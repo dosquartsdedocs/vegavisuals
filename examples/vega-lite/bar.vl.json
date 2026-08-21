@@ -1,0 +1,38 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "title": {
+    "text": "Quarterly documentation output",
+    "subtitle": "A Vega-Lite example backed by project-local CSV"
+  },
+  "data": {
+    "url": "data/quarters.csv"
+  },
+  "width": 480,
+  "height": 280,
+  "mark": {
+    "type": "bar",
+    "cornerRadiusEnd": 3
+  },
+  "encoding": {
+    "x": {
+      "field": "quarter",
+      "type": "ordinal",
+      "axis": {"title": null, "labelAngle": 0}
+    },
+    "y": {
+      "field": "pages",
+      "type": "quantitative",
+      "axis": {"title": "Published pages"}
+    },
+    "color": {
+      "field": "stream",
+      "type": "nominal",
+      "legend": {"title": "Stream"}
+    },
+    "tooltip": [
+      {"field": "quarter", "type": "ordinal"},
+      {"field": "pages", "type": "quantitative"},
+      {"field": "stream", "type": "nominal"}
+    ]
+  }
+}

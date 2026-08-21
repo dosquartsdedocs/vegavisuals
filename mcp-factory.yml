@@ -1,0 +1,93 @@
+---
+name: vegavisuals
+kind: codex-mcp-factory
+version: 0.2.0
+description: Hardened Docker rendering for themed Vega-Lite and raw Vega visualizations.
+license: GPL-3.0-only
+repository: https://github.com/dosquartsdedocs/vegavisuals
+workspace_rule:
+  consumer_root: .
+  source_paths:
+    - .vegavisuals.yml
+  generated_paths:
+    - .cache/vegavisuals
+    - .vegavisuals.lock.json
+  init_creates:
+    - .cache/vegavisuals
+  allowed_external_writes: []
+runtime:
+  kind: python
+  package_manager: pip
+  package: 'vegavisuals[mcp]'
+  module: vegavisuals
+transport:
+  type: stdio
+  command:
+    - vegavisuals
+    - --project
+    - '${workspaceFolder}'
+    - mcp
+    - serve
+commands:
+  build:
+    - vegavisuals
+    - build-renderer
+  check:
+    - vegavisuals
+    - check
+  tests:
+    - make
+    - tests
+  smoke:
+    - make
+    - mcp-smoke
+  down:
+    - make
+    - mcp-down
+  client_config:
+    - vegavisuals
+    - mcp
+    - client-config
+  serve:
+    - vegavisuals
+    - mcp
+    - serve
+  manifest:
+    - vegavisuals
+    - factory-manifest
+  render:
+    - vegavisuals
+    - render
+  render_all:
+    - vegavisuals
+    - render-all
+mcp:
+  server_name: vegavisuals
+  transport: stdio
+  consumer_root_fixed_at_startup: true
+  resources:
+    - vegavisuals://agent-guide
+    - vegavisuals://themes
+    - vegavisuals://compatibility
+    - vegavisuals://project/status
+    - vegavisuals://project/check
+    - vegavisuals://factory-manifest
+  required_tools:
+    - validate_visualization
+    - render_visualization
+    - render_visualization_text
+    - visualization_status
+    - visualization_check
+    - render_visualizations
+    - theme_inventory
+    - compatibility_status
+    - factory_manifest
+defaults:
+  profile: vl-convert-1.9.0
+  family: benizar
+contracts:
+  manifest: 1
+  lock: 2
+  inline_cache: 2
+  mcp_errors: typed-application-result
+...

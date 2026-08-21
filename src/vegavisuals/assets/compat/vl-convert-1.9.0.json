@@ -1,0 +1,64 @@
+{
+  "id": "vl-convert-1.9.0",
+  "image": "vegavisuals/render:vl-convert-1.9.0",
+  "base_image": "python:3.13-slim-bookworm@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1",
+  "dockerfile": "Dockerfile",
+  "vl_convert_python": "1.9.0.post1",
+  "vega_runtime": "6.2.0",
+  "vega_lite": {
+    "default": "6.4",
+    "supported": [
+      "5.8",
+      "5.14",
+      "5.15",
+      "5.16",
+      "5.17",
+      "5.20",
+      "5.21",
+      "6.1",
+      "6.4"
+    ]
+  },
+  "engines": ["vega-lite", "vega"],
+  "formats": ["svg", "png", "pdf"],
+  "fonts": [
+    {
+      "family": "DejaVu Sans",
+      "package": "fonts-dejavu-core",
+      "version": "2.37-6"
+    },
+    {
+      "family": "DejaVu Serif",
+      "package": "fonts-dejavu-core",
+      "version": "2.37-6"
+    },
+    {
+      "family": "DejaVu Sans Mono",
+      "package": "fonts-dejavu-core",
+      "version": "2.37-6"
+    }
+  ],
+  "pdf_normalizer": {
+    "tool": "qpdf",
+    "version": "11.3.0-1+deb12u1",
+    "arguments": ["--deterministic-id", "--object-streams=disable"]
+  },
+  "network_policy": {
+    "runtime": "none",
+    "remote_data": "deny",
+    "local_data": "project-relative-host-inlined"
+  },
+  "runtime_limits": {
+    "cpus": "1.0",
+    "memory": "768m",
+    "pids": 64,
+    "tmpfs": "128m",
+    "timeout_seconds": 300,
+    "max_source_bytes": 10485760,
+    "max_inline_source_bytes": 1048576,
+    "max_dependency_bytes": 104857600,
+    "max_prepared_spec_bytes": 134217728,
+    "max_output_bytes": 52428800,
+    "max_inline_response_bytes": 8388608
+  }
+}

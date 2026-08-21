@@ -1,0 +1,25 @@
+{
+  "family": "benizar",
+  "font": {
+    "sans": "DejaVu Sans",
+    "mono": "DejaVu Sans Mono"
+  },
+  "colors": {
+    "ink": "#0F223A",
+    "blue_900": "#072A4F",
+    "blue_800": "#0B3A6E",
+    "blue_700": "#1D4E89",
+    "blue_600": "#2A5DB0",
+    "blue_300": "#6F9DCE",
+    "blue_100": "#DCEAF8",
+    "blue_050": "#EAF3FF",
+    "paper": "#F5FAFF",
+    "panel": "#F2F7FD",
+    "green": "#1B9E77",
+    "orange": "#D95F02",
+    "purple": "#7570B3",
+    "rose": "#E7298A",
+    "olive": "#66A61E",
+    "gold": "#E6AB02"
+  }
+}

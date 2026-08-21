@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "visualizations": {
+    "local-csv-bars": {
+      "engine": "vega-lite",
+      "family": "benizar",
+      "fingerprint": "1d0a993f3bebbee55deea4f4b811cd28ea2621e68362476813fd2836ade87189",
+      "format": "svg",
+      "inputs": [
+        "examples/vega-lite/data/quarters.csv"
+      ],
+      "output": "examples/rendered/bar.svg",
+      "output_sha256": "987ea6041dd49e2fc19e6efbbe9d3398652ffab4a51c96bc0771080c14518b9b",
+      "profile": "vl-convert-1.9.0",
+      "renderer": {
+        "base_image": "python:3.13-slim-bookworm@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1",
+        "image": "vegavisuals/render:vl-convert-1.9.0",
+        "image_id": "sha256:695125943d0fbc3aa7c877babb9a11a6501bbc7ac265b0975bb5657c60439d98",
+        "renderer_contract": "28bd331ce12ca101b2b1326328b5bd5c8e89a5ecae6f478160ecbbf3c70ed800"
+      },
+      "source": "examples/vega-lite/bar.vl.json",
+      "vega_lite_version": "6.4"
+    },
+    "raw-vega-latency": {
+      "engine": "vega",
+      "family": "benizar",
+      "fingerprint": "ff2760cfdff34e9f45cd797c0559681fcfff5b57342659d87b15756571c6777a",
+      "format": "svg",
+      "inputs": [],
+      "output": "examples/rendered/raw-vega.svg",
+      "output_sha256": "ec6cf1401fe95f4f99808d4ce706c420b8625d51c368799d703ce4741a7a1974",
+      "profile": "vl-convert-1.9.0",
+      "renderer": {
+        "base_image": "python:3.13-slim-bookworm@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1",
+        "image": "vegavisuals/render:vl-convert-1.9.0",
+        "image_id": "sha256:695125943d0fbc3aa7c877babb9a11a6501bbc7ac265b0975bb5657c60439d98",
+        "renderer_contract": "28bd331ce12ca101b2b1326328b5bd5c8e89a5ecae6f478160ecbbf3c70ed800"
+      },
+      "source": "examples/vega/raw.vg.json",
+      "vega_lite_version": null
+    }
+  }
+}

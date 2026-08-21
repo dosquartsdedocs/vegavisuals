@@ -1,0 +1,72 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v6.json",
+  "description": "A raw Vega line chart with inline values.",
+  "width": 480,
+  "height": 280,
+  "padding": 12,
+  "title": {
+    "text": "Factory render latency",
+    "subtitle": "Raw Vega with an explicit dataflow"
+  },
+  "data": [
+    {
+      "name": "latency",
+      "values": [
+        {"build": "01", "seconds": 42},
+        {"build": "02", "seconds": 35},
+        {"build": "03", "seconds": 31},
+        {"build": "04", "seconds": 27},
+        {"build": "05", "seconds": 24}
+      ]
+    }
+  ],
+  "scales": [
+    {
+      "name": "x",
+      "type": "point",
+      "domain": {"data": "latency", "field": "build"},
+      "range": "width",
+      "padding": 0.5
+    },
+    {
+      "name": "y",
+      "type": "linear",
+      "domain": {"data": "latency", "field": "seconds"},
+      "nice": true,
+      "zero": false,
+      "range": "height"
+    }
+  ],
+  "axes": [
+    {"orient": "bottom", "scale": "x", "title": "Build"},
+    {"orient": "left", "scale": "y", "title": "Seconds"}
+  ],
+  "marks": [
+    {
+      "type": "line",
+      "from": {"data": "latency"},
+      "encode": {
+        "enter": {
+          "x": {"scale": "x", "field": "build"},
+          "y": {"scale": "y", "field": "seconds"},
+          "stroke": {"value": "#2A5DB0"},
+          "strokeWidth": {"value": 3}
+        }
+      }
+    },
+    {
+      "type": "symbol",
+      "from": {"data": "latency"},
+      "encode": {
+        "enter": {
+          "x": {"scale": "x", "field": "build"},
+          "y": {"scale": "y", "field": "seconds"},
+          "fill": {"value": "#F5FAFF"},
+          "stroke": {"value": "#2A5DB0"},
+          "strokeWidth": {"value": 2},
+          "size": {"value": 90}
+        }
+      }
+    }
+  ]
+}

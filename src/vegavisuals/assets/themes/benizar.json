@@ -1,0 +1,52 @@
+{
+  "background": "#F5FAFF",
+  "font": "DejaVu Sans",
+  "view": {
+    "continuousHeight": 300,
+    "continuousWidth": 420,
+    "stroke": "#DCEAF8"
+  },
+  "axis": {
+    "domainColor": "#2A5DB0",
+    "domainWidth": 1,
+    "gridColor": "#DCEAF8",
+    "gridOpacity": 0.8,
+    "labelColor": "#0F223A",
+    "labelFont": "DejaVu Sans",
+    "labelFontSize": 12,
+    "tickColor": "#6F9DCE",
+    "titleColor": "#072A4F",
+    "titleFont": "DejaVu Sans",
+    "titleFontSize": 13,
+    "titleFontWeight": 600
+  },
+  "legend": {
+    "labelColor": "#0F223A",
+    "labelFont": "DejaVu Sans",
+    "titleColor": "#072A4F",
+    "titleFont": "DejaVu Sans",
+    "titleFontWeight": 600
+  },
+  "title": {
+    "anchor": "start",
+    "color": "#072A4F",
+    "font": "DejaVu Sans",
+    "fontSize": 18,
+    "fontWeight": 600,
+    "subtitleColor": "#1D4E89",
+    "subtitleFont": "DejaVu Sans"
+  },
+  "range": {
+    "category": [
+      "#2A5DB0",
+      "#1B9E77",
+      "#D95F02",
+      "#7570B3",
+      "#E7298A",
+      "#66A61E",
+      "#E6AB02"
+    ],
+    "diverging": ["#D95F02", "#F5FAFF", "#2A5DB0"],
+    "heatmap": ["#EAF3FF", "#6F9DCE", "#072A4F"]
+  }
+}

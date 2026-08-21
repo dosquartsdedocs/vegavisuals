@@ -1,0 +1,16 @@
+version: 1
+profile: vl-convert-1.9.0
+family: benizar
+visualizations:
+  - name: local-csv-bars
+    source: examples/vega-lite/bar.vl.json
+    output: examples/rendered/bar.svg
+    engine: vega-lite
+    format: svg
+    inputs:
+      - examples/vega-lite/data/quarters.csv
+  - name: raw-vega-latency
+    source: examples/vega/raw.vg.json
+    output: examples/rendered/raw-vega.svg
+    engine: vega
+    format: svg
