@@ -8,13 +8,22 @@ FORMAT ?=
 INPUT ?=
 OUTPUT ?=
 REQUIRE_DOCKER ?= 0
-MCP_VENV ?= .cache/vegavisuals/mcp-venv
+override MCP_VENV := .cache/vegavisuals/mcp-venv
 MCP_PYTHON := $(MCP_VENV)/bin/python
 MCP_CLI := $(MCP_VENV)/bin/vegavisuals
 MCP_STAMP := $(MCP_VENV)/.installed
+MCP_VERSION := 1.29.0
 CONTAINER_LABEL := io.context.mcp-factory=vegavisuals
+override PROJECT := $(value PROJECT)
+override PROFILE := $(value PROFILE)
+override FAMILY := $(value FAMILY)
+override ENGINE := $(value ENGINE)
+override FORMAT := $(value FORMAT)
+override INPUT := $(value INPUT)
+override OUTPUT := $(value OUTPUT)
+export PROJECT PROFILE FAMILY ENGINE FORMAT INPUT OUTPUT
 
-.PHONY: help build check test tests tests-install renderer-build docker-smoke mcp-env mcp-build mcp-stdio mcp-smoke mcp-down render-image clean
+.PHONY: help build check test tests tests-install renderer-build docker-smoke mcp-env mcp-build mcp-init mcp-check mcp-stdio mcp-smoke mcp-down render-image clean
 
 help:
 	@printf '%s\n' \
@@ -24,7 +33,9 @@ help:
 	  'make tests-install  Verify a non-editable wheel and packaged assets' \
 	  'make renderer-build Build the pinned vl-convert Docker image' \
 	  'make docker-smoke   Render SVG, PNG, and PDF with both engines when Docker is available' \
-	  'make mcp-build      Prepare the renderer image and MCP virtual environment' \
+	  'make mcp-build      Bootstrap the MCP environment and renderer for PROJECT' \
+	  'make mcp-init       Initialize PROJECT without overwriting existing files' \
+	  'make mcp-check      Validate the MCP install, factory, and PROJECT' \
 	  'make mcp-stdio      Serve MCP over stdio for PROJECT' \
 	  'make mcp-smoke      Exercise MCP stdio and both real Docker engines' \
 	  'make render-image INPUT=... OUTPUT=... [FORMAT=svg]'
@@ -64,13 +75,17 @@ tests-install: build
 	@$(PYTHON) -m venv .tmp/install-venv
 	@wheels=(.tmp/sdist-wheel/vegavisuals-*.whl); .tmp/install-venv/bin/python -m pip install --disable-pip-version-check "$${wheels[0]}[mcp]" >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . version >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . install-check --command "$${PWD}/.tmp/install-venv/bin/vegavisuals" >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli --project . install-check >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli --project . lifecycle-check >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import sys; from vegavisuals import Registry; manifest=Registry(".").factory_manifest(); command=manifest["transport"]["command"]; assert command[:3] == [sys.executable, "-m", "vegavisuals.cli"]; assert "make" not in command'
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . factory-check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . render examples/vega-lite/bar.vl.json .cache/vegavisuals/install-check.svg --dry-run >/dev/null
-	@env -u PYTHONPATH VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$(abspath .tmp/install-venv/bin/vegavisuals)" .tmp/install-venv/bin/python -m unittest tests.test_mcp_stdio
+	@env -u PYTHONPATH VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$${PWD}/.tmp/install-venv/bin/vegavisuals" .tmp/install-venv/bin/python -m unittest tests.test_mcp_stdio
 
 renderer-build:
-	@PYTHONPATH=src $(PYTHON) -m vegavisuals.cli --project "$(PROJECT)" build-renderer --profile "$(PROFILE)" >/dev/null
+	@PYTHONPATH=src $(PYTHON) -m vegavisuals.cli --project "$${PROJECT}" build-renderer --profile "$${PROFILE}" >/dev/null
 
 docker-smoke:
 	@if docker info >/dev/null 2>&1; then \
@@ -86,16 +101,27 @@ mcp-env: $(MCP_STAMP)
 $(MCP_STAMP): pyproject.toml
 	@mkdir -p "$(dir $(MCP_VENV))"
 	@$(PYTHON) -m venv "$(MCP_VENV)"
-	@"$(MCP_PYTHON)" -m pip install --disable-pip-version-check --editable '.[mcp]' >/dev/null
+	@"$(MCP_PYTHON)" -m pip install --disable-pip-version-check --editable '.[mcp]' "mcp==$(MCP_VERSION)" >/dev/null
 	@touch "$@"
 
-mcp-build: renderer-build mcp-env
+mcp-build: mcp-env
+	@"$(MCP_CLI)" --project "$${PROJECT}" install-check --command "$${PWD}/$(MCP_CLI)" >/dev/null
+	@"$(MCP_CLI)" --project "$${PROJECT}" ensure-renderer --profile "$${PROFILE}" >/dev/null
 
-mcp-stdio: mcp-env
-	@"$(MCP_CLI)" --project "$(PROJECT)" mcp serve
+mcp-init: mcp-env
+	@"$(MCP_CLI)" --project "$${PROJECT}" init >/dev/null
+
+mcp-check: mcp-env
+	@"$(MCP_CLI)" --project "$${PROJECT}" install-check --command "$${PWD}/$(MCP_CLI)" >/dev/null
+	@"$(MCP_CLI)" --project "$${PROJECT}" factory-check --profile "$${PROFILE}" --family "$${FAMILY}" >/dev/null
+	@"$(MCP_CLI)" --project "$${PROJECT}" check >/dev/null
+
+mcp-stdio: mcp-build
+	@"$(MCP_CLI)" --project "$${PROJECT}" mcp serve
 
 mcp-smoke: mcp-build
-	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$(abspath $(MCP_CLI))" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
+	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$${PWD}/$(MCP_CLI)" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
+	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND=bash VEGAVISUALS_MCP_FACTORY_ROOT="$${PWD}" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
 	@if docker info >/dev/null 2>&1; then \
 	  VEGAVISUALS_DOCKER_SMOKE=1 "$(MCP_PYTHON)" -m unittest tests.test_docker_smoke; \
 	elif [[ "$(REQUIRE_DOCKER)" == "1" ]]; then \
@@ -109,11 +135,11 @@ mcp-down:
 	if [[ -n "$$containers" ]]; then docker container rm --force $$containers >/dev/null; fi
 
 render-image:
-	@test -n "$(INPUT)" || (printf '%s\n' 'INPUT is required' >&2; exit 2)
-	@test -n "$(OUTPUT)" || (printf '%s\n' 'OUTPUT is required' >&2; exit 2)
-	@format_args=(); if [[ -n "$(FORMAT)" ]]; then format_args=(--format "$(FORMAT)"); fi; \
-	PYTHONPATH=src $(PYTHON) -m vegavisuals.cli --project "$(PROJECT)" render \
-	  "$(INPUT)" "$(OUTPUT)" --engine "$(ENGINE)" --profile "$(PROFILE)" --family "$(FAMILY)" "$${format_args[@]}"
+	@test -n "$${INPUT}" || (printf '%s\n' 'INPUT is required' >&2; exit 2)
+	@test -n "$${OUTPUT}" || (printf '%s\n' 'OUTPUT is required' >&2; exit 2)
+	@format_args=(); if [[ -n "$${FORMAT}" ]]; then format_args=(--format "$${FORMAT}"); fi; \
+	PYTHONPATH=src $(PYTHON) -m vegavisuals.cli --project "$${PROJECT}" render \
+	  "$${INPUT}" "$${OUTPUT}" --engine "$${ENGINE}" --profile "$${PROFILE}" --family "$${FAMILY}" "$${format_args[@]}"
 
 clean:
 	@rm -rf build dist .tmp .cache src/vegavisuals/__pycache__ src/vegavisuals/assets/docker/__pycache__ tests/__pycache__

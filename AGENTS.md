@@ -31,7 +31,9 @@ environments, or renderer containers.
 
 ## Factory lifecycle
 
-- `make mcp-build` prepares the image and optional MCP environment.
+- `make mcp-build PROJECT=/consumer/root` bootstraps the pinned private MCP environment and renderer image.
+- `make mcp-init PROJECT=/consumer/root` initializes the consumer idempotently.
+- `make mcp-check PROJECT=/consumer/root` validates the installation, factory, and consumer manifest.
 - `make mcp-stdio PROJECT=/consumer/root` fixes that root and serves stdio.
 - `make mcp-smoke` checks protocol discovery and both render engines.
 - `make mcp-down` removes only containers with the vegavisuals factory label.

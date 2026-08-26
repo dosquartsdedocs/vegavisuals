@@ -2,12 +2,13 @@
 
 ## Supported Versions
 
-Only the latest `0.2.x` release receives security fixes. Older and unreleased
+Only the latest `0.3.x` release receives security fixes. Older and unreleased
 development snapshots are not supported.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | Yes |
+| 0.3.x | Yes |
+| 0.2.x | No |
 | Earlier versions | No |
 
 ## Reporting A Vulnerability

@@ -346,7 +346,10 @@ class InventoryTest(TemporaryProject):
         self.assertEqual(tuple(manifest["mcp"]["resources"]), RESOURCE_URIS)
 
         static = safe_load((REPO_ROOT / "mcp-factory.yml").read_text(encoding="utf-8"))
+        self.assertEqual(static["schema_version"], manifest["schema_version"])
         self.assertEqual(static["version"], __version__)
+        self.assertEqual(static["kind"], manifest["kind"])
+        self.assertEqual(static["description"], manifest["description"])
         self.assertEqual(static["license"], manifest["license"])
         self.assertEqual(static["repository"], manifest["repository"])
         self.assertEqual(tuple(static["mcp"]["required_tools"]), TOOL_NAMES)
@@ -355,8 +358,154 @@ class InventoryTest(TemporaryProject):
         self.assertEqual(static["runtime"], manifest["runtime"])
         self.assertEqual(static["transport"], manifest["transport"])
         self.assertEqual(static["workspace_rule"], manifest["workspace_rule"])
-        for command in ("build", "check", "serve", "client_config", "manifest", "render", "render_all"):
-            self.assertEqual(static["commands"][command], manifest["commands"][command])
+        self.assertEqual(static["commands"], manifest["commands"])
+        self.assertEqual(static["discovery"], manifest["discovery"])
+        self.assertEqual(static["release"], manifest["release"])
+        self.assertEqual(static["defaults"], manifest["defaults"])
+        for key in ("server_name", "transport", "consumer_root_fixed_at_startup"):
+            self.assertEqual(static["mcp"][key], manifest["mcp"][key])
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        for variable in ("PROJECT", "PROFILE", "FAMILY", "ENGINE", "FORMAT", "INPUT", "OUTPUT"):
+            self.assertNotIn(f"$({variable})", makefile)
+
+    def test_installed_manifest_uses_the_current_python_without_a_factory_makefile(self) -> None:
+        with patch("vegavisuals.registry.source_checkout", return_value=None):
+            manifest = self.registry.factory_manifest()
+        command = manifest["transport"]["command"]
+        self.assertEqual(command[:3], [sys.executable, "-m", "vegavisuals.cli"])
+        self.assertNotIn("make", command)
+        self.assertEqual(manifest["commands"]["init"][-1], "init")
+        self.assertEqual(manifest["commands"]["check"][-1], "lifecycle-check")
+
+    def test_initialize_is_idempotent_and_force_is_explicit(self) -> None:
+        first = self.registry.initialize_project()
+        manifest = self.root / ".vegavisuals.yml"
+        self.assertEqual(first["created"], [".vegavisuals.yml"])
+        self.assertEqual(safe_load(manifest.read_text(encoding="utf-8"))["visualizations"], [])
+
+        write(manifest, "consumer owned\n")
+        preserved = self.registry.initialize_project()
+        self.assertEqual(preserved["preserved"], [".vegavisuals.yml"])
+        self.assertEqual(manifest.read_text(encoding="utf-8"), "consumer owned\n")
+
+        replaced = self.registry.initialize_project(force=True)
+        self.assertTrue(replaced["force"])
+        self.assertEqual(safe_load(manifest.read_text(encoding="utf-8"))["version"], 1)
+
+    def test_initialize_rejects_a_symlink_manifest(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside.yml"
+        write(outside, "outside\n")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        (self.root / ".vegavisuals.yml").symlink_to(outside)
+
+        with self.assertRaisesRegex(PolicyError, "must not be a symlink"):
+            self.registry.initialize_project(force=True)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_default_client_config_uses_the_installed_interpreter(self) -> None:
+        server = self.registry.client_config()["mcpServers"]["vegavisuals"]
+        self.assertEqual(server["command"], sys.executable)
+        self.assertEqual(server["args"][:2], ["-m", "vegavisuals.cli"])
+        self.assertIn(str("${workspaceFolder}"), server["args"])
+
+    def test_package_release_and_update_are_non_mutating(self) -> None:
+        with patch("vegavisuals.registry.source_checkout", return_value=None):
+            release = self.registry.release_status(f"v{__version__}")
+            update = self.registry.update_factory()
+        self.assertTrue(release["ok"])
+        self.assertEqual(release["source"], "package")
+        self.assertTrue(update["dry_run"])
+        self.assertIn("pip", update["command"])
+
+    def test_checkout_update_refuses_a_dirty_tree(self) -> None:
+        dirty = {"command": ["git"], "returncode": 0, "stdout": " M README.md\n", "stderr": ""}
+        with (
+            patch("vegavisuals.registry.source_checkout", return_value=REPO_ROOT),
+            patch("vegavisuals.registry._run_command", return_value=dirty),
+        ):
+            result = self.registry.update_factory()
+        self.assertFalse(result["ok"])
+        self.assertIn("Refusing", result["message"])
+
+    def test_checkout_release_requires_exact_clean_head(self) -> None:
+        results = [
+            {"command": ["git"], "returncode": 0, "stdout": "a" * 40 + "\n", "stderr": ""},
+            {"command": ["git"], "returncode": 0, "stdout": "b" * 40 + "\n", "stderr": ""},
+            {"command": ["git"], "returncode": 0, "stdout": f"v{__version__}\n", "stderr": ""},
+            {"command": ["git"], "returncode": 0, "stdout": "", "stderr": ""},
+        ]
+        with (
+            patch("vegavisuals.registry.source_checkout", return_value=REPO_ROOT),
+            patch("vegavisuals.registry._run_command", side_effect=results),
+        ):
+            release = self.registry.release_status(f"v{__version__}")
+        self.assertFalse(release["ok"])
+        self.assertFalse(release["current_matches_release"])
+
+    def test_install_check_rejects_expected_version_text_from_a_failing_cli(self) -> None:
+        results = [
+            {
+                "command": ["vegavisuals"],
+                "returncode": 1,
+                "stdout": f"vegavisuals {__version__}\n",
+                "stderr": "failed",
+            },
+            {
+                "command": [sys.executable],
+                "returncode": 0,
+                "stdout": "1.29.0\n",
+                "stderr": "",
+            },
+        ]
+        with (
+            patch("vegavisuals.registry.shutil.which", return_value="/tmp/vegavisuals"),
+            patch("vegavisuals.registry._entrypoint_python", return_value=sys.executable),
+            patch("vegavisuals.registry._run_command", side_effect=results),
+        ):
+            result = self.registry.install_check("vegavisuals")
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["cli_version_matches"])
+
+    def test_codex_install_dry_run_uses_startup_fixed_project(self) -> None:
+        result = self.registry.install_codex_mcp(dry_run=True, codex_bin="codex-test")
+        self.assertTrue(result["ok"])
+        self.assertIn(str(self.root), result["add"])
+        self.assertIn("-m", result["add"])
+
+    def test_codex_install_preserves_a_different_registration(self) -> None:
+        existing = {
+            "command": ["codex", "mcp", "list"],
+            "returncode": 0,
+            "stdout": json.dumps(
+                [
+                    {
+                        "name": "vegavisuals",
+                        "enabled": False,
+                        "transport": {
+                            "command": sys.executable,
+                            "args": [
+                                "-m",
+                                "vegavisuals.cli",
+                                "--project",
+                                str(self.root),
+                                "mcp",
+                                "serve",
+                            ],
+                            "env": {},
+                        },
+                    }
+                ]
+            ),
+            "stderr": "",
+        }
+        with (
+            patch("vegavisuals.registry.shutil.which", return_value="/usr/bin/codex"),
+            patch("vegavisuals.registry._run_command", return_value=existing) as run,
+        ):
+            result = self.registry.install_codex_mcp()
+        self.assertFalse(result["ok"])
+        self.assertIn("refusing", result["message"])
+        run.assert_called_once()
 
     def test_root_and_packaged_dockerfiles_are_semantically_synchronized(self) -> None:
         root = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")

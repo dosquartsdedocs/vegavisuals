@@ -13,9 +13,11 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -33,6 +35,9 @@ from .errors import ManifestError, PolicyError, RenderError, ValidationError
 
 DEFAULT_PROFILE = "vl-convert-1.9.0"
 DEFAULT_FAMILY = "benizar"
+DEFAULT_RELEASE = f"v{__version__}"
+REPOSITORY_URL = "https://github.com/dosquartsdedocs/vegavisuals"
+MCP_VERSION = "1.29.0"
 MANIFEST_NAME = ".vegavisuals.yml"
 LOCK_NAME = ".vegavisuals.lock.json"
 LOCK_VERSION = 2
@@ -88,6 +93,31 @@ VEGA_LITE_MARKS = {
     "trail",
 }
 VEGA_MARKS = {"arc", "area", "group", "image", "line", "path", "rect", "rule", "shape", "symbol", "text", "trail"}
+MCP_TOOL_NAMES = (
+    "initialize_project",
+    "validate_visualization",
+    "render_visualization",
+    "render_visualization_text",
+    "visualization_status",
+    "visualization_check",
+    "render_visualizations",
+    "theme_inventory",
+    "compatibility_status",
+    "factory_check",
+    "release_status",
+    "update",
+    "factory_manifest",
+)
+MCP_RESOURCE_URIS = (
+    "vegavisuals://agent-guide",
+    "vegavisuals://themes",
+    "vegavisuals://compatibility",
+    "vegavisuals://project/status",
+    "vegavisuals://project/check",
+    "vegavisuals://factory/check",
+    "vegavisuals://release",
+    "vegavisuals://factory-manifest",
+)
 
 CommandResult = dict[str, Any]
 Runner = Callable[..., CommandResult]
@@ -270,6 +300,32 @@ def asset_root() -> pathlib.Path:
     if not root.is_dir():
         raise ValidationError("installed vegavisuals package does not contain its assets")
     return root
+
+
+def source_checkout() -> pathlib.Path | None:
+    candidate = pathlib.Path(__file__).resolve().parents[2]
+    if (candidate / ".git").exists() and (candidate / "pyproject.toml").is_file():
+        return candidate
+    return None
+
+
+def factory_metadata_root() -> pathlib.Path:
+    checkout = source_checkout()
+    if checkout is not None:
+        return checkout
+    packaged = pathlib.Path(__file__).resolve().parent / "factory"
+    return packaged if packaged.is_dir() else asset_root()
+
+
+def _entrypoint_python(command_path: str) -> str | None:
+    try:
+        first_line = pathlib.Path(command_path).read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+    except (IndexError, OSError, UnicodeDecodeError):
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    executable = first_line[2:].strip().split()[0]
+    return executable if pathlib.Path(executable).is_file() else None
 
 
 def _relative(path: pathlib.Path, root: pathlib.Path) -> str:
@@ -474,6 +530,46 @@ class Registry:
             self.close()
         except OSError:
             pass
+
+    def initialize_project(self, *, force: bool = False) -> dict[str, Any]:
+        manifest_data = (
+            "version: 1\n"
+            f"profile: {DEFAULT_PROFILE}\n"
+            f"family: {DEFAULT_FAMILY}\n"
+            "visualizations: []\n"
+        ).encode("utf-8")
+        relative = self._project_write_relative(MANIFEST_NAME, description="visualization manifest")
+        with self._project_lock():
+            snapshot = self._project_file_snapshot(
+                relative,
+                max_bytes=1024 * 1024,
+                description="visualization manifest",
+            )
+            if snapshot.exists and not force:
+                return {
+                    "ok": True,
+                    "project": str(self.project_root),
+                    "created": [],
+                    "ensured": [".cache/vegavisuals"],
+                    "preserved": [MANIFEST_NAME],
+                    "manifest": MANIFEST_NAME,
+                    "force": False,
+                }
+            publication = self._replace_project_bytes(
+                relative,
+                manifest_data,
+                expected=snapshot,
+            )
+            publication.commit()
+        return {
+            "ok": True,
+            "project": str(self.project_root),
+            "created": [MANIFEST_NAME],
+            "ensured": [".cache/vegavisuals"],
+            "preserved": [],
+            "manifest": MANIFEST_NAME,
+            "force": force,
+        }
 
     def resolve_project_path(
         self,
@@ -1192,24 +1288,81 @@ class Registry:
             raise ValidationError(f"unknown theme family: {family}")
         return {"ok": True, "families": items, "count": len(items), "default": DEFAULT_FAMILY}
 
-    def factory_check(self) -> dict[str, Any]:
+    def factory_check(
+        self,
+        profile: str = DEFAULT_PROFILE,
+        family: str = DEFAULT_FAMILY,
+    ) -> dict[str, Any]:
         issues: list[str] = []
         try:
-            compatibility = self.compatibility_status()
+            compatibility = self.compatibility_status(profile)
         except ValidationError as exc:
             compatibility = {"ok": False, "error": str(exc)}
             issues.append(str(exc))
         try:
-            themes = self.theme_inventory()
+            themes = self.theme_inventory(family)
         except ValidationError as exc:
             themes = {"ok": False, "error": str(exc)}
             issues.append(str(exc))
         dockerfile = self.assets / "Dockerfile"
         worker = self.assets / "docker" / "worker.py"
+        discovery_manifest = factory_metadata_root() / "mcp-factory.yml"
         if not dockerfile.is_file():
             issues.append("packaged Dockerfile is missing")
         if not worker.is_file():
             issues.append("packaged renderer worker is missing")
+        if not discovery_manifest.is_file():
+            issues.append("factory discovery manifest is missing")
+        discovery: dict[str, Any] | None = None
+        if discovery_manifest.is_file():
+            try:
+                raw = discovery_manifest.read_bytes()
+                if len(raw) > 1024 * 1024:
+                    raise ValidationError("factory discovery manifest exceeds 1 MiB")
+                text = raw.decode("utf-8")
+                if any(isinstance(token, yaml.tokens.AliasToken) for token in yaml.scan(text)):
+                    raise ValidationError("factory discovery manifest must not use YAML aliases")
+                loaded = yaml.load(text, Loader=_UniqueKeyLoader)
+                if not isinstance(loaded, dict):
+                    raise ValidationError("factory discovery manifest must be a mapping")
+                discovery = loaded
+                dynamic = self.factory_manifest()
+                parity = {
+                    "schema_version": dynamic["schema_version"],
+                    "name": dynamic["name"],
+                    "version": dynamic["version"],
+                    "kind": dynamic["kind"],
+                    "description": dynamic["description"],
+                    "license": dynamic["license"],
+                    "repository": dynamic["repository"],
+                    "workspace_rule": dynamic["workspace_rule"],
+                    "runtime": dynamic["runtime"],
+                    "discovery": dynamic["discovery"],
+                    "release": dynamic["release"],
+                    "defaults": dynamic["defaults"],
+                    "contracts": dynamic["contracts"],
+                }
+                if source_checkout() is not None:
+                    parity["transport"] = dynamic["transport"]
+                    parity["commands"] = dynamic["commands"]
+                for key, expected in parity.items():
+                    if discovery.get(key) != expected:
+                        issues.append(f"static factory manifest does not match dynamic {key}")
+                static_mcp = discovery.get("mcp")
+                if discovery.get("factory_assets") != "src/vegavisuals/assets":
+                    issues.append("static factory assets path is invalid")
+                if not isinstance(static_mcp, dict):
+                    issues.append("static factory manifest has no MCP contract")
+                else:
+                    for key in ("server_name", "transport", "consumer_root_fixed_at_startup"):
+                        if static_mcp.get(key) != dynamic["mcp"][key]:
+                            issues.append(f"static factory MCP {key} does not match the adapter")
+                    if static_mcp.get("required_tools") != list(MCP_TOOL_NAMES):
+                        issues.append("static factory tools do not match the MCP adapter")
+                    if static_mcp.get("resources") != list(MCP_RESOURCE_URIS):
+                        issues.append("static factory resources do not match the MCP adapter")
+            except (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError) as exc:
+                issues.append(str(exc))
         if dockerfile.is_file():
             dockerfile_text = dockerfile.read_text(encoding="utf-8")
             if "ARG BASE_IMAGE=" not in dockerfile_text or "FROM ${BASE_IMAGE}" not in dockerfile_text:
@@ -1229,6 +1382,11 @@ class Registry:
             "assets": {
                 "dockerfile": dockerfile.is_file(),
                 "worker": worker.is_file(),
+                "factory_manifest": discovery_manifest.is_file(),
+            },
+            "discovery": {
+                "path": str(discovery_manifest),
+                "parsed": discovery is not None,
             },
         }
 
@@ -3248,20 +3406,289 @@ class Registry:
             "dry_run": dry_run,
         }
 
+    def release_status(self, release: str = DEFAULT_RELEASE) -> dict[str, Any]:
+        checkout = source_checkout()
+        version_matches = release == DEFAULT_RELEASE
+        if checkout is None:
+            return {
+                "ok": version_matches,
+                "source": "package",
+                "requested": release,
+                "package_version": __version__,
+                "current_tag": DEFAULT_RELEASE,
+                "current_matches_release": version_matches,
+            }
+        tag = _run_command(
+            ["git", "-C", str(checkout), "rev-parse", "--verify", f"refs/tags/{release}^{{commit}}"],
+            cwd=checkout,
+            timeout=30,
+        )
+        head = _run_command(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            cwd=checkout,
+            timeout=30,
+        )
+        current = _run_command(
+            ["git", "-C", str(checkout), "describe", "--tags", "--exact-match"],
+            cwd=checkout,
+            timeout=30,
+        )
+        status = _run_command(
+            ["git", "-C", str(checkout), "status", "--porcelain"],
+            cwd=checkout,
+            timeout=30,
+        )
+        current_tag = current["stdout"].strip() if current["returncode"] == 0 else None
+        requested_sha = tag["stdout"].strip() if tag["returncode"] == 0 else None
+        current_head = head["stdout"].strip() if head["returncode"] == 0 else None
+        clean = status["returncode"] == 0 and not status["stdout"].strip()
+        current_matches = current_tag == release and current_head == requested_sha
+        return {
+            "ok": version_matches and current_matches and clean,
+            "source": "checkout",
+            "requested": release,
+            "package_version": __version__,
+            "requested_sha": requested_sha,
+            "current_head": current_head,
+            "current_tag": current_tag,
+            "current_matches_release": current_matches,
+            "clean": clean,
+        }
+
+    def update_factory(self, *, dry_run: bool = False) -> dict[str, Any]:
+        checkout = source_checkout()
+        if checkout is None:
+            command = [sys.executable, "-m", "pip", "install", "--upgrade", "vegavisuals[mcp]"]
+            return {
+                "ok": True,
+                "source": "package",
+                "dry_run": True,
+                "message": "Installed packages are not mutated by the MCP; run the upgrade command explicitly.",
+                "command": command,
+            }
+        status = _run_command(
+            ["git", "-C", str(checkout), "status", "--porcelain"],
+            cwd=checkout,
+            timeout=30,
+        )
+        if status["returncode"] != 0 or status["stdout"].strip():
+            return {
+                "ok": False,
+                "source": "checkout",
+                "message": "Refusing to update a dirty or unreadable vegavisuals checkout.",
+                "status": status,
+            }
+        command = ["git", "-C", str(checkout), "pull", "--ff-only"]
+        if dry_run:
+            return {
+                "ok": True,
+                "source": "checkout",
+                "dry_run": True,
+                "repo": str(checkout),
+                "command": command,
+            }
+        result = _run_command(command, cwd=checkout, timeout=300)
+        return {
+            "ok": result["returncode"] == 0,
+            "source": "checkout",
+            "result": result,
+        }
+
+    def install_check(self, command: str = "") -> dict[str, Any]:
+        resolved = shutil.which(command) if command else None
+        if command and not resolved:
+            candidate = pathlib.Path(command).expanduser()
+            if candidate.is_file():
+                resolved = str(candidate.resolve())
+        invoked = pathlib.Path(sys.argv[0])
+        if not resolved and invoked.name == "vegavisuals" and invoked.is_file():
+            resolved = str(invoked.resolve())
+        if resolved:
+            resolved = str(pathlib.Path(resolved).resolve())
+        launcher = [resolved] if resolved else ([sys.executable, "-m", "vegavisuals.cli"] if not command else [])
+        version_result = None
+        mcp_dependency = None
+        if launcher:
+            version_result = _run_command([*launcher, "--version"], cwd=self.project_root, timeout=30)
+            python = _entrypoint_python(resolved) if resolved else sys.executable
+            if python:
+                mcp_dependency = _run_command(
+                    [
+                        python,
+                        "-c",
+                        "from importlib.metadata import version; "
+                        "from mcp.server.fastmcp import FastMCP; print(version('mcp'))",
+                    ],
+                    cwd=self.project_root,
+                    timeout=30,
+                )
+            else:
+                mcp_dependency = {
+                    "command": [resolved],
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Could not determine the Python interpreter used by the CLI entrypoint.",
+                }
+        manifest = factory_metadata_root() / "mcp-factory.yml"
+        cli_version_matches = bool(
+            version_result
+            and version_result["returncode"] == 0
+            and version_result["stdout"].strip() == f"vegavisuals {__version__}"
+        )
+        mcp_version = mcp_dependency["stdout"].strip() if mcp_dependency else None
+        mcp_version_matches = bool(
+            mcp_dependency and mcp_dependency["returncode"] == 0 and mcp_version == MCP_VERSION
+        )
+        ok = bool(
+            cli_version_matches
+            and mcp_version_matches
+            and manifest.is_file()
+        )
+        return {
+            "ok": ok,
+            "command": command or "vegavisuals",
+            "resolved": resolved,
+            "launcher": launcher,
+            "version_result": version_result,
+            "cli_version_matches": cli_version_matches,
+            "mcp_dependency": mcp_dependency,
+            "mcp_version": mcp_version,
+            "mcp_version_matches": mcp_version_matches,
+            "factory_manifest": str(manifest),
+            "factory_manifest_exists": manifest.is_file(),
+            "package_version": __version__,
+            "install_hints": [
+                "python3 -m pip install 'vegavisuals[mcp]'",
+                f"uv tool install 'vegavisuals[mcp] @ git+{REPOSITORY_URL}.git@{DEFAULT_RELEASE}'",
+            ],
+        }
+
+    def lifecycle_check(self, command: str = "") -> dict[str, Any]:
+        install = self.install_check(command)
+        factory = self.factory_check()
+        project = self.visualization_check()
+        return {
+            "ok": install["ok"] and factory["ok"] and project["ok"],
+            "install": install,
+            "factory": factory,
+            "project": project,
+        }
+
+    def install_codex_mcp(
+        self,
+        *,
+        server_name: str = "vegavisuals",
+        codex_bin: str = "codex",
+        command: str = "",
+        project: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        resolved_codex = shutil.which(codex_bin) or (codex_bin if dry_run else None)
+        if not resolved_codex:
+            return {"ok": False, "message": f"Codex binary not found: {codex_bin}"}
+        server = self.client_config(
+            workspace_placeholder=project or str(self.project_root),
+            command=command,
+        )["mcpServers"]["vegavisuals"]
+        server_parts = [server["command"], *server.get("args", [])]
+        list_command = [resolved_codex, "mcp", "list", "--json"]
+        add = [resolved_codex, "mcp", "add", server_name, "--", *server_parts]
+        payload: dict[str, Any] = {
+            "ok": True,
+            "server_name": server_name,
+            "list": list_command,
+            "add": add,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return payload
+        list_result = _run_command(list_command, cwd=self.project_root, timeout=60)
+        payload["list_result"] = {
+            "returncode": list_result["returncode"],
+        }
+        if list_result["returncode"] != 0:
+            payload["ok"] = False
+            payload["message"] = "Codex MCP registrations could not be listed safely; refusing to make changes."
+            return payload
+        try:
+            listed = json.loads(list_result["stdout"])
+            if isinstance(listed, list):
+                servers = listed
+            elif isinstance(listed, dict) and isinstance(listed.get("servers"), list):
+                servers = listed["servers"]
+            elif isinstance(listed, dict) and server_name in listed and isinstance(listed[server_name], dict):
+                servers = [{"name": server_name, **listed[server_name]}]
+            else:
+                raise ValueError("unexpected Codex MCP list shape")
+            existing = next((item for item in servers if isinstance(item, dict) and item.get("name") == server_name), None)
+        except (TypeError, ValueError):
+            payload["ok"] = False
+            payload["message"] = "Codex MCP registrations could not be parsed safely; refusing to make changes."
+            return payload
+        if existing is not None:
+            transport = existing.get("transport", existing)
+            if not isinstance(transport, dict):
+                payload["ok"] = False
+                payload["message"] = "The existing Codex MCP transport is invalid; refusing to replace it."
+                return payload
+            existing_command = transport.get("command")
+            existing_args = transport.get("args", [])
+            if not isinstance(existing_command, str) or not isinstance(existing_args, list) or not all(
+                isinstance(value, str) for value in existing_args
+            ):
+                payload["ok"] = False
+                payload["message"] = "The existing Codex MCP command is invalid; refusing to replace it."
+                return payload
+            existing_parts = [existing_command, *existing_args]
+            behavior = {
+                key: value
+                for key, value in transport.items()
+                if key not in {"type", "command", "args"} and value not in (None, "", [], {})
+            }
+            outer_behavior = {
+                key: value
+                for key, value in existing.items()
+                if key not in {"name", "transport", "enabled", "disabled_reason"}
+                and value not in (None, "", [], {})
+            }
+            enabled = existing.get("enabled", True) is True
+            disabled_reason = existing.get("disabled_reason")
+            if (
+                transport.get("type", "stdio") == "stdio"
+                and existing_parts == server_parts
+                and not behavior
+                and not outer_behavior
+                and enabled
+                and disabled_reason in (None, "")
+            ):
+                payload["already_configured"] = True
+                return payload
+            payload["ok"] = False
+            payload["message"] = (
+                "A different Codex MCP registration already exists; refusing to replace it without explicit removal."
+            )
+            return payload
+        payload["add_result"] = _run_command(add, cwd=self.project_root, timeout=60)
+        payload["ok"] = payload["add_result"]["returncode"] == 0
+        return payload
+
     def client_config(
         self,
         *,
         workspace_placeholder: str = "${workspaceFolder}",
-        command: str = "vegavisuals",
+        command: str = "",
         vscode: bool = False,
     ) -> dict[str, Any]:
+        server_command = command or sys.executable
         args = ["--project", workspace_placeholder, "mcp", "serve"]
+        if not command:
+            args = ["-m", "vegavisuals.cli", *args]
         if vscode:
             return {
                 "servers": {
                     "vegavisuals": {
                         "type": "stdio",
-                        "command": command,
+                        "command": server_command,
                         "args": args,
                     }
                 }
@@ -3269,46 +3696,81 @@ class Registry:
         return {
             "mcpServers": {
                 "vegavisuals": {
-                    "command": command,
+                    "command": server_command,
                     "args": args,
                 }
             }
         }
 
     def factory_manifest(self) -> dict[str, Any]:
-        tools = [
-            "validate_visualization",
-            "render_visualization",
-            "render_visualization_text",
-            "visualization_status",
-            "visualization_check",
-            "render_visualizations",
-            "theme_inventory",
-            "compatibility_status",
-            "factory_manifest",
-        ]
-        resources = [
-            "vegavisuals://agent-guide",
-            "vegavisuals://themes",
-            "vegavisuals://compatibility",
-            "vegavisuals://project/status",
-            "vegavisuals://project/check",
-            "vegavisuals://factory-manifest",
-        ]
+        checkout = source_checkout()
+        factory_root = factory_metadata_root()
+        client = self.client_config()["mcpServers"]["vegavisuals"]
+        if checkout is not None:
+            factory_launcher = [
+                "bash",
+                "${factoryRoot}/scripts/factory-launcher",
+                "${workspaceFolder}",
+            ]
+            transport = [*factory_launcher, "serve"]
+            commands = {
+                "build": [*factory_launcher, "build"],
+                "init": [*factory_launcher, "init"],
+                "check": [*factory_launcher, "check"],
+                "tests": [*factory_launcher, "tests"],
+                "smoke": [*factory_launcher, "smoke"],
+                "down": [*factory_launcher, "down"],
+                "update": [*factory_launcher, "update"],
+                "release_status": [*factory_launcher, "release-status"],
+                "install_check": [*factory_launcher, "install-check"],
+                "install_codex_mcp": [*factory_launcher, "install-codex-mcp"],
+                "factory_check": [*factory_launcher, "factory-check"],
+                "serve": transport,
+                "client_config": [*factory_launcher, "client-config"],
+                "manifest": [*factory_launcher, "manifest"],
+                "render": [*factory_launcher, "render"],
+                "render_all": [*factory_launcher, "render-all"],
+            }
+        else:
+            package_cli = [sys.executable, "-m", "vegavisuals.cli"]
+            project_cli = [*package_cli, "--project", "${workspaceFolder}"]
+            transport = [*project_cli, "mcp", "serve"]
+            commands = {
+                "build": [*project_cli, "ensure-renderer"],
+                "init": [*project_cli, "init"],
+                "check": [*project_cli, "lifecycle-check"],
+                "update": [*package_cli, "update"],
+                "release_status": [*project_cli, "release-status"],
+                "install_check": [*project_cli, "install-check"],
+                "install_codex_mcp": [
+                    *project_cli,
+                    "install-codex-mcp",
+                    "--workspace",
+                    "${workspaceFolder}",
+                ],
+                "factory_check": [*project_cli, "factory-check"],
+                "serve": transport,
+                "client_config": [*project_cli, "mcp", "client-config"],
+                "manifest": [*project_cli, "factory-manifest"],
+                "render": [*project_cli, "render"],
+                "render_all": [*project_cli, "render-all"],
+            }
         return {
             "ok": True,
+            "schema_version": 1,
             "name": "vegavisuals",
             "version": __version__,
             "kind": "codex-mcp-factory",
             "description": "Hardened Docker rendering for themed Vega-Lite and Vega visualizations.",
             "license": "GPL-3.0-only",
-            "repository": "https://github.com/dosquartsdedocs/vegavisuals",
+            "repository": REPOSITORY_URL,
+            "factory": str(factory_root),
             "factory_assets": str(self.assets),
             "workspace_rule": {
                 "consumer_root": ".",
                 "source_paths": [MANIFEST_NAME],
                 "generated_paths": [".cache/vegavisuals", LOCK_NAME],
-                "init_creates": [".cache/vegavisuals"],
+                "init_creates": [".cache/vegavisuals", MANIFEST_NAME],
                 "allowed_external_writes": [],
             },
             "runtime": {
@@ -3316,26 +3778,30 @@ class Registry:
                 "package_manager": "pip",
                 "package": "vegavisuals[mcp]",
                 "module": "vegavisuals",
+                "mcp_version": MCP_VERSION,
             },
             "transport": {
                 "type": "stdio",
-                "command": ["vegavisuals", "--project", "${workspaceFolder}", "mcp", "serve"],
+                "command": transport,
             },
-            "commands": {
-                "build": ["vegavisuals", "build-renderer"],
-                "check": ["vegavisuals", "check"],
-                "serve": ["vegavisuals", "mcp", "serve"],
-                "client_config": ["vegavisuals", "mcp", "client-config"],
-                "manifest": ["vegavisuals", "factory-manifest"],
-                "render": ["vegavisuals", "render"],
-                "render_all": ["vegavisuals", "render-all"],
-            },
+            "commands": commands,
             "mcp": {
                 "server_name": "vegavisuals",
                 "transport": "stdio",
                 "consumer_root_fixed_at_startup": True,
-                "tools": tools,
-                "resources": resources,
+                "command": [client["command"], *client["args"]],
+                "tools": list(MCP_TOOL_NAMES),
+                "resources": list(MCP_RESOURCE_URIS),
+            },
+            "discovery": {
+                "file": "mcp-factory.yml",
+                "suggested_scan_roots": ["~/git"],
+                "checkout_required_for_make_lifecycle": True,
+            },
+            "release": {
+                "default": DEFAULT_RELEASE,
+                "profile": DEFAULT_PROFILE,
+                "family": DEFAULT_FAMILY,
             },
             "defaults": {
                 "profile": DEFAULT_PROFILE,
