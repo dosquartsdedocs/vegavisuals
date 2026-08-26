@@ -28,8 +28,21 @@ class MCPStdioSmokeTest(unittest.TestCase):
                 project = pathlib.Path(temporary)
                 shutil.copytree(REPO_ROOT / "examples", project / "examples")
                 executable = os.environ.get("VEGAVISUALS_MCP_COMMAND")
+                arguments_json = os.environ.get("VEGAVISUALS_MCP_ARGS_JSON")
+                factory_root = os.environ.get("VEGAVISUALS_MCP_FACTORY_ROOT")
                 environment = dict(os.environ)
-                if executable:
+                if executable and factory_root:
+                    environment.pop("PYTHONPATH", None)
+                    command = executable
+                    args = [str(pathlib.Path(factory_root) / "scripts/factory-launcher"), str(project), "serve"]
+                elif executable and arguments_json:
+                    environment.pop("PYTHONPATH", None)
+                    command = executable
+                    args = [
+                        str(value).replace("{project}", str(project))
+                        for value in json.loads(arguments_json)
+                    ]
+                elif executable:
                     environment.pop("PYTHONPATH", None)
                     command = executable
                     args = ["--project", str(project), "mcp", "serve"]
@@ -53,10 +66,21 @@ class MCPStdioSmokeTest(unittest.TestCase):
                         self.assertIn("render_visualization", names)
                         self.assertIn("render_visualization_text", names)
                         self.assertIn("visualization_status", names)
+                        self.assertIn("initialize_project", names)
+                        self.assertIn("factory_check", names)
+                        self.assertIn("release_status", names)
                         resources = await session.list_resources()
                         uris = {str(resource.uri) for resource in resources.resources}
                         self.assertIn("vegavisuals://themes", uris)
+                        self.assertIn("vegavisuals://factory/check", uris)
+                        self.assertIn("vegavisuals://release", uris)
                         self.assertIn("vegavisuals://factory-manifest", uris)
+                        initialized = await session.call_tool("initialize_project", {})
+                        initialized_payload = json.loads(
+                            "\n".join(getattr(item, "text", "") for item in initialized.content)
+                        )
+                        self.assertTrue(initialized_payload["ok"], initialized_payload)
+                        self.assertTrue((project / ".vegavisuals.yml").is_file())
                         result = await session.call_tool("theme_inventory", {})
                         text = "\n".join(getattr(item, "text", "") for item in result.content)
                         self.assertIn("benizar", text)

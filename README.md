@@ -39,6 +39,20 @@ containers themselves run without network access and never pull images.
 No prebuilt renderer image is published; each installation builds its local
 image from the licensed source package and pinned compatibility profile.
 
+The checkout also exposes a self-contained consumer lifecycle. It creates a
+private MCP environment under the factory, pins `mcp==1.29.0`, and never writes
+tooling into the consumer:
+
+```bash
+make mcp-build PROJECT=/path/to/consumer
+make mcp-init PROJECT=/path/to/consumer
+make mcp-check PROJECT=/path/to/consumer
+make mcp-stdio PROJECT=/path/to/consumer
+```
+
+`mcp-init` creates an empty `.vegavisuals.yml` and the generated cache tree. It
+preserves an existing manifest unless `vegavisuals init --force` is requested.
+
 The two repository examples cover a Vega-Lite bar chart with project-local CSV
 and a raw Vega chart:
 
@@ -155,7 +169,13 @@ vegavisuals [--project ROOT] version
 vegavisuals [--project ROOT] profile-inventory
 vegavisuals [--project ROOT] theme-inventory [--family FAMILY]
 vegavisuals [--project ROOT] compatibility-status [--profile PROFILE]
-vegavisuals [--project ROOT] factory-check
+vegavisuals [--project ROOT] factory-check [--profile PROFILE] [--family FAMILY]
+vegavisuals [--project ROOT] init [--force]
+vegavisuals [--project ROOT] install-check [--command EXECUTABLE]
+vegavisuals [--project ROOT] lifecycle-check [--command EXECUTABLE]
+vegavisuals [--project ROOT] install-codex-mcp [--dry-run]
+vegavisuals [--project ROOT] release-status [--release TAG]
+vegavisuals [--project ROOT] update [--dry-run]
 vegavisuals [--project ROOT] validate SOURCE [--engine auto|vega-lite|vega] [--input PATH]
 vegavisuals [--project ROOT] render SOURCE OUTPUT [--format svg|png|pdf] [--name NAME]
 vegavisuals [--project ROOT] render-text [--text JSON] [--output PATH]
@@ -200,8 +220,11 @@ registry.render_visualization_text(spec_json, output_format="png")
 registry.visualization_status()
 registry.visualization_check()
 registry.render_visualizations()
+registry.initialize_project()
 registry.theme_inventory()
 registry.compatibility_status()
+registry.install_check()
+registry.release_status()
 registry.factory_manifest()
 ```
 
@@ -221,6 +244,7 @@ vegavisuals --project /path/to/consumer mcp serve
 Tools:
 
 ```text
+initialize_project
 validate_visualization
 render_visualization
 render_visualization_text
@@ -229,6 +253,9 @@ visualization_check
 render_visualizations
 theme_inventory
 compatibility_status
+factory_check
+release_status
+update
 factory_manifest
 ```
 
@@ -240,6 +267,8 @@ vegavisuals://themes
 vegavisuals://compatibility
 vegavisuals://project/status
 vegavisuals://project/check
+vegavisuals://factory/check
+vegavisuals://release
 vegavisuals://factory-manifest
 ```
 
@@ -253,11 +282,26 @@ Generate a client configuration template with:
 vegavisuals mcp client-config --workspace-placeholder '${workspaceFolder}'
 ```
 
-The default placeholder is a literal for clients that expand
+The default configuration launches `-m vegavisuals.cli` with the exact Python
+interpreter running the installed CLI, so it does not depend on the client
+`PATH`. The default placeholder is a literal for clients that expand
 `${workspaceFolder}`. Replace it with an absolute consumer path when the client
 does not perform that expansion. Use `--command /absolute/path/to/vegavisuals`
-when the executable is not on the client PATH, and `--format vscode-workspace`
-for VS Code's workspace shape.
+to select an explicit launcher, and `--format vscode-workspace` for VS Code's
+workspace shape. `vegavisuals install-codex-mcp --workspace /absolute/root`
+preserves an identical registration, adds a missing one, and refuses to replace
+a different registration; inspect the commands first with `--dry-run`.
+
+The MCP `update` tool is deliberately non-mutating and returns the explicit
+update command. An operator can run `vegavisuals update` directly to
+fast-forward a clean checkout; installed wheels only report their explicit pip
+upgrade.
+
+`mcp-factory.yml` is the checkout discovery contract and the installed wheel
+also carries it for diagnostics. The Make lifecycle is intentionally
+checkout-only because it owns the private environment and renderer bootstrap;
+an installed wheel exposes equivalent dynamic metadata with
+`vegavisuals factory-manifest`.
 
 ## Verification
 
@@ -266,6 +310,7 @@ python3 -m pip install -e '.[mcp,dev]'
 make check
 make tests
 make tests-install
+make mcp-check PROJECT=/path/to/initialized/consumer
 make docker-smoke
 make mcp-smoke
 ```

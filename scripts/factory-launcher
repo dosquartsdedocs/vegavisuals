@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FACTORY_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+PROJECT_ROOT="${1:?consumer project root is required}"
+OPERATION="${2:?factory operation is required}"
+shift 2
+
+CLI="${FACTORY_ROOT}/.cache/vegavisuals/mcp-venv/bin/vegavisuals"
+
+bootstrap() {
+  make --silent --no-print-directory -C "${FACTORY_ROOT}" mcp-env
+}
+
+case "${OPERATION}" in
+  build)
+    bootstrap
+    "${CLI}" --project "${PROJECT_ROOT}" install-check --command "${CLI}" >/dev/null
+    "${CLI}" --project "${PROJECT_ROOT}" ensure-renderer >/dev/null
+    ;;
+  init)
+    bootstrap
+    "${CLI}" --project "${PROJECT_ROOT}" init
+    ;;
+  check)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" lifecycle-check --command "${CLI}"
+    ;;
+  tests)
+    exec make --no-print-directory -C "${FACTORY_ROOT}" tests
+    ;;
+  smoke)
+    exec make --no-print-directory -C "${FACTORY_ROOT}" mcp-smoke
+    ;;
+  down)
+    exec make --no-print-directory -C "${FACTORY_ROOT}" mcp-down
+    ;;
+  update)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" update "$@"
+    ;;
+  release-status)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" release-status "$@"
+    ;;
+  install-check)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" install-check --command "${CLI}" "$@"
+    ;;
+  install-codex-mcp)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" install-codex-mcp --workspace "${PROJECT_ROOT}" "$@"
+    ;;
+  factory-check)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" factory-check "$@"
+    ;;
+  serve)
+    bootstrap
+    "${CLI}" --project "${PROJECT_ROOT}" install-check --command "${CLI}" >/dev/null
+    "${CLI}" --project "${PROJECT_ROOT}" ensure-renderer >/dev/null
+    exec "${CLI}" --project "${PROJECT_ROOT}" mcp serve
+    ;;
+  client-config)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" mcp client-config --command "${CLI}" "$@"
+    ;;
+  manifest)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" factory-manifest "$@"
+    ;;
+  render)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" render "$@"
+    ;;
+  render-all)
+    bootstrap
+    exec "${CLI}" --project "${PROJECT_ROOT}" render-all "$@"
+    ;;
+  *)
+    printf 'Unknown factory operation: %s\n' "${OPERATION}" >&2
+    exit 2
+    ;;
+esac

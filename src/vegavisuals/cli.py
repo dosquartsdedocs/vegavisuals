@@ -7,7 +7,7 @@ from typing import Any
 
 from ._version import __version__
 from .errors import ValidationError, VegavisualsError
-from .registry import DEFAULT_FAMILY, DEFAULT_PROFILE, MANIFEST_NAME, Registry, json_dumps
+from .registry import DEFAULT_FAMILY, DEFAULT_PROFILE, DEFAULT_RELEASE, MANIFEST_NAME, Registry, json_dumps
 
 
 def _print(payload: Any) -> None:
@@ -49,7 +49,24 @@ def build_parser() -> argparse.ArgumentParser:
     theme.add_argument("--family", default="")
     compatibility = commands.add_parser("compatibility-status", help="Inspect one compatibility profile")
     compatibility.add_argument("--profile", default=DEFAULT_PROFILE)
-    commands.add_parser("factory-check", help="Validate packaged profiles, themes, and renderer assets")
+    factory_check = commands.add_parser("factory-check", help="Validate packaged profiles, themes, and renderer assets")
+    _add_contract_options(factory_check)
+    initialize = commands.add_parser("init", help="Initialize a consumer project without overwriting it")
+    initialize.add_argument("--force", action="store_true")
+    release_status = commands.add_parser("release-status", help="Inspect package or checkout release status")
+    release_status.add_argument("--release", default=DEFAULT_RELEASE)
+    update = commands.add_parser("update", help="Update a clean checkout or report the package upgrade command")
+    update.add_argument("--dry-run", action="store_true")
+    install_check = commands.add_parser("install-check", help="Validate CLI, MCP dependency, and discovery assets")
+    install_check.add_argument("--command", dest="executable", default="")
+    lifecycle_check = commands.add_parser("lifecycle-check", help="Validate installation, factory, and consumer")
+    lifecycle_check.add_argument("--command", dest="executable", default="")
+    install_codex = commands.add_parser("install-codex-mcp", help="Install the startup-fixed MCP in Codex")
+    install_codex.add_argument("--name", default="vegavisuals")
+    install_codex.add_argument("--codex-bin", default="codex")
+    install_codex.add_argument("--command", dest="executable", default="")
+    install_codex.add_argument("--workspace", default="")
+    install_codex.add_argument("--dry-run", action="store_true")
 
     validate = commands.add_parser("validate", help="Validate one .vl.json or .vg.json source")
     validate.add_argument("source")
@@ -95,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_commands.add_parser("serve", help="Run the FastMCP server over stdio")
     client = mcp_commands.add_parser("client-config", help="Return an MCP client configuration")
     client.add_argument("--workspace-placeholder", default="${workspaceFolder}")
-    client.add_argument("--command", dest="mcp_executable", default="vegavisuals")
+    client.add_argument("--command", dest="mcp_executable", default="")
     client.add_argument("--format", choices=["generic", "vscode-workspace"], default="generic")
     mcp_commands.add_parser("list-tools", help="List the stable MCP tool and resource contract")
     return parser
@@ -111,7 +128,27 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
     if args.command == "compatibility-status":
         return _result(registry.compatibility_status(args.profile))
     if args.command == "factory-check":
-        return _result(registry.factory_check())
+        return _result(registry.factory_check(profile=args.profile, family=args.family))
+    if args.command == "init":
+        return _result(registry.initialize_project(force=args.force))
+    if args.command == "release-status":
+        return _result(registry.release_status(args.release))
+    if args.command == "update":
+        return _result(registry.update_factory(dry_run=args.dry_run))
+    if args.command == "install-check":
+        return _result(registry.install_check(args.executable))
+    if args.command == "lifecycle-check":
+        return _result(registry.lifecycle_check(args.executable))
+    if args.command == "install-codex-mcp":
+        return _result(
+            registry.install_codex_mcp(
+                server_name=args.name,
+                codex_bin=args.codex_bin,
+                command=args.executable,
+                project=args.workspace or None,
+                dry_run=args.dry_run,
+            )
+        )
     if args.command == "validate":
         return _result(
             registry.validate_visualization(

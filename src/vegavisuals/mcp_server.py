@@ -3,29 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import VegavisualsError
-from .registry import DEFAULT_FAMILY, DEFAULT_PROFILE, MANIFEST_NAME, Registry, json_dumps
-
-
-TOOL_NAMES = (
-    "validate_visualization",
-    "render_visualization",
-    "render_visualization_text",
-    "visualization_status",
-    "visualization_check",
-    "render_visualizations",
-    "theme_inventory",
-    "compatibility_status",
-    "factory_manifest",
+from .registry import (
+    DEFAULT_FAMILY,
+    DEFAULT_PROFILE,
+    DEFAULT_RELEASE,
+    MANIFEST_NAME,
+    MCP_RESOURCE_URIS,
+    MCP_TOOL_NAMES,
+    Registry,
+    json_dumps,
 )
 
-RESOURCE_URIS = (
-    "vegavisuals://agent-guide",
-    "vegavisuals://themes",
-    "vegavisuals://compatibility",
-    "vegavisuals://project/status",
-    "vegavisuals://project/check",
-    "vegavisuals://factory-manifest",
-)
+
+TOOL_NAMES = MCP_TOOL_NAMES
+
+RESOURCE_URIS = MCP_RESOURCE_URIS
 
 
 def _safe(call: Any) -> dict[str, Any]:
@@ -73,10 +65,25 @@ def create_server(registry: Registry, fastmcp_class: Any | None = None) -> Any:
         """Strict freshness check for the startup consumer root."""
         return json_dumps(_safe(registry.visualization_check))
 
+    @mcp.resource("vegavisuals://factory/check")
+    def factory_check_resource() -> str:
+        """Factory and packaged-asset diagnostics."""
+        return json_dumps(_safe(registry.factory_check))
+
+    @mcp.resource("vegavisuals://release")
+    def release_resource() -> str:
+        """Status of the default release contract."""
+        return json_dumps(_safe(lambda: registry.release_status(DEFAULT_RELEASE)))
+
     @mcp.resource("vegavisuals://factory-manifest")
     def factory_manifest_resource() -> str:
         """Factory discovery contract."""
         return json_dumps(registry.factory_manifest())
+
+    @mcp.tool()
+    def initialize_project(force: bool = False) -> dict[str, Any]:
+        """Initialize the fixed consumer root without overwriting files by default."""
+        return _safe(lambda: registry.initialize_project(force=force))
 
     @mcp.tool()
     def validate_visualization(
@@ -195,6 +202,21 @@ def create_server(registry: Registry, fastmcp_class: Any | None = None) -> Any:
     def compatibility_status(profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
         """Inspect the data-parsed renderer compatibility profile."""
         return _safe(lambda: registry.compatibility_status(profile))
+
+    @mcp.tool()
+    def factory_check(profile: str = DEFAULT_PROFILE, family: str = DEFAULT_FAMILY) -> dict[str, Any]:
+        """Run factory, package-asset, renderer, profile, and family diagnostics."""
+        return _safe(lambda: registry.factory_check(profile=profile, family=family))
+
+    @mcp.tool()
+    def release_status(release: str = DEFAULT_RELEASE) -> dict[str, Any]:
+        """Inspect the installed package or source checkout against a release tag."""
+        return _safe(lambda: registry.release_status(release))
+
+    @mcp.tool()
+    def update() -> dict[str, Any]:
+        """Report the explicit clean-checkout or package update command without executing it."""
+        return _safe(lambda: registry.update_factory(dry_run=True))
 
     @mcp.tool()
     def factory_manifest() -> dict[str, Any]:
