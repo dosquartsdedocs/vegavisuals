@@ -151,7 +151,7 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-        except ModuleNotFoundError as exc:
+        except ImportError as exc:
             return _result(
                 {
                     "ok": False,

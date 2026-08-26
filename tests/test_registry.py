@@ -439,24 +439,30 @@ class InventoryTest(TemporaryProject):
         self.assertFalse(result["ok"])
         self.assertEqual(runner.call_count, 1)
 
-    def test_mcp_smoke_reports_a_missing_optional_dependency_as_json(self) -> None:
+    def test_mcp_smoke_reports_an_unavailable_optional_dependency_as_json(self) -> None:
         arguments = build_parser().parse_args(["mcp-smoke"])
         real_import = __import__
 
-        def import_without_mcp(name, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if name == "mcp" or name.startswith("mcp."):
-                raise ModuleNotFoundError("No module named 'mcp'")
-            return real_import(name, *args, **kwargs)
+        for error in (
+            ModuleNotFoundError("No module named 'mcp'"),
+            ImportError("cannot import name 'ClientSession' from 'mcp'"),
+        ):
+            with self.subTest(error=type(error).__name__):
 
-        with patch("builtins.__import__", side_effect=import_without_mcp), patch(
-            "vegavisuals.cli._print"
-        ) as output:
-            status = dispatch(arguments, self.registry)
+                def import_unavailable_mcp(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+                    if name == "mcp" or name.startswith("mcp."):
+                        raise error
+                    return real_import(name, *args, **kwargs)
 
-        self.assertEqual(status, 1)
-        payload = output.call_args.args[0]
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["type"], "ModuleNotFoundError")
+                with patch("builtins.__import__", side_effect=import_unavailable_mcp), patch(
+                    "vegavisuals.cli._print"
+                ) as output:
+                    status = dispatch(arguments, self.registry)
+
+                self.assertEqual(status, 1)
+                payload = output.call_args.args[0]
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["type"], type(error).__name__)
 
     def test_initialize_is_idempotent_and_force_is_explicit(self) -> None:
         first = self.registry.initialize_project()
