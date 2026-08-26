@@ -1327,6 +1327,7 @@ class Registry:
                     raise ValidationError("factory discovery manifest must be a mapping")
                 discovery = loaded
                 dynamic = self.factory_manifest()
+                checkout = source_checkout()
                 parity = {
                     "schema_version": dynamic["schema_version"],
                     "name": dynamic["name"],
@@ -1342,15 +1343,42 @@ class Registry:
                     "defaults": dynamic["defaults"],
                     "contracts": dynamic["contracts"],
                 }
-                if source_checkout() is not None:
-                    parity["transport"] = dynamic["transport"]
-                    parity["commands"] = dynamic["commands"]
                 for key, expected in parity.items():
                     if discovery.get(key) != expected:
                         issues.append(f"static factory manifest does not match dynamic {key}")
+
+                def normalize_command(command: Any) -> Any:
+                    if checkout is None and isinstance(command, list) and command[:1] == ["vegavisuals"]:
+                        return [sys.executable, "-m", "vegavisuals.cli", *command[1:]]
+                    return command
+
+                static_transport = discovery.get("transport")
+                if not isinstance(static_transport, dict) or {
+                    **static_transport,
+                    "command": normalize_command(static_transport.get("command")),
+                } != dynamic["transport"]:
+                    issues.append("static factory manifest does not match dynamic transport")
+                static_commands = discovery.get("commands")
+                if not isinstance(static_commands, dict) or {
+                    key: normalize_command(command) for key, command in static_commands.items()
+                } != dynamic["commands"]:
+                    issues.append("static factory manifest does not match dynamic commands")
                 static_mcp = discovery.get("mcp")
-                if discovery.get("factory_assets") != "src/vegavisuals/assets":
+                static_assets = discovery.get("factory_assets")
+                if not isinstance(static_assets, str) or (
+                    discovery_manifest.parent / static_assets
+                ).resolve() != self.assets:
                     issues.append("static factory assets path is invalid")
+                if checkout is None:
+                    serialized = json.dumps(discovery, sort_keys=True)
+                    for forbidden in (
+                        "${factoryRoot}",
+                        "scripts/factory-launcher",
+                        "src/vegavisuals/assets",
+                        '"make"',
+                    ):
+                        if forbidden in serialized:
+                            issues.append(f"installed factory manifest references checkout-only value: {forbidden}")
                 if not isinstance(static_mcp, dict):
                     issues.append("static factory manifest has no MCP contract")
                 else:
@@ -3574,6 +3602,86 @@ class Registry:
             "project": project,
         }
 
+    def self_test(self) -> dict[str, Any]:
+        factory = self.factory_check()
+        cases = [
+            (
+                "vega-lite",
+                {
+                    "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+                    "data": {"values": [{"x": "A", "y": 1}]},
+                    "mark": "bar",
+                    "encoding": {
+                        "x": {"field": "x", "type": "nominal"},
+                        "y": {"field": "y", "type": "quantitative"},
+                    },
+                },
+            ),
+            (
+                "vega",
+                {
+                    "$schema": "https://vega.github.io/schema/vega/v6.json",
+                    "width": 100,
+                    "height": 80,
+                    "data": [{"name": "table", "values": [{"x": 1}]}],
+                    "marks": [{"type": "rect"}],
+                },
+            ),
+        ]
+        validations = [
+            self.render_visualization_text(
+                json.dumps(spec),
+                engine=engine,
+                output_format="svg",
+                dry_run=True,
+            )
+            for engine, spec in cases
+        ]
+        return {
+            "ok": factory["ok"] and all(result.get("ok", False) for result in validations),
+            "factory": factory,
+            "validations": validations,
+        }
+
+    def down(self) -> dict[str, Any]:
+        docker = shutil.which("docker")
+        if not docker:
+            return {"ok": True, "containers": [], "message": "Docker is unavailable"}
+        listed = _run_command(
+            [
+                docker,
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"label={CONTAINER_LABEL}",
+            ],
+            cwd=self.project_root,
+            timeout=30,
+        )
+        if listed["returncode"] != 0:
+            return {"ok": False, "containers": [], "result": listed}
+        containers = listed["stdout"].split()
+        if any(not re.fullmatch(r"[0-9a-f]{12,64}", container) for container in containers):
+            return {
+                "ok": False,
+                "containers": [],
+                "message": "Docker returned an invalid container identifier; refusing cleanup.",
+            }
+        if not containers:
+            return {"ok": True, "containers": []}
+        removed = _run_command(
+            [docker, "container", "rm", "--force", *containers],
+            cwd=self.project_root,
+            timeout=60,
+        )
+        return {
+            "ok": removed["returncode"] == 0,
+            "containers": containers,
+            "result": removed,
+        }
+
     def install_codex_mcp(
         self,
         *,
@@ -3739,6 +3847,9 @@ class Registry:
                 "build": [*project_cli, "ensure-renderer"],
                 "init": [*project_cli, "init"],
                 "check": [*project_cli, "lifecycle-check"],
+                "tests": [*project_cli, "self-test"],
+                "smoke": [*project_cli, "mcp-smoke"],
+                "down": [*project_cli, "down"],
                 "update": [*package_cli, "update"],
                 "release_status": [*project_cli, "release-status"],
                 "install_check": [*project_cli, "install-check"],
@@ -3796,7 +3907,7 @@ class Registry:
             "discovery": {
                 "file": "mcp-factory.yml",
                 "suggested_scan_roots": ["~/git"],
-                "checkout_required_for_make_lifecycle": True,
+                "checkout_required_for_make_lifecycle": checkout is not None,
             },
             "release": {
                 "default": DEFAULT_RELEASE,

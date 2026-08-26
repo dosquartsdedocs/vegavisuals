@@ -61,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     install_check.add_argument("--command", dest="executable", default="")
     lifecycle_check = commands.add_parser("lifecycle-check", help="Validate installation, factory, and consumer")
     lifecycle_check.add_argument("--command", dest="executable", default="")
+    commands.add_parser("self-test", help="Run package-native factory and validation checks")
+    commands.add_parser("mcp-smoke", help="Probe MCP stdio and render both engines")
+    commands.add_parser("down", help="Remove containers owned by the vegavisuals factory")
     install_codex = commands.add_parser("install-codex-mcp", help="Install the startup-fixed MCP in Codex")
     install_codex.add_argument("--name", default="vegavisuals")
     install_codex.add_argument("--codex-bin", default="codex")
@@ -139,6 +142,109 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
         return _result(registry.install_check(args.executable))
     if args.command == "lifecycle-check":
         return _result(registry.lifecycle_check(args.executable))
+    if args.command == "self-test":
+        return _result(registry.self_test())
+    if args.command == "mcp-smoke":
+        import asyncio
+        import os
+
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except ModuleNotFoundError as exc:
+            return _result(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": "mcp-smoke requires the vegavisuals[mcp] extra",
+                    },
+                }
+            )
+
+        async def probe() -> dict[str, Any]:
+            parameters = StdioServerParameters(
+                command=sys.executable,
+                args=[
+                    "-m",
+                    "vegavisuals.cli",
+                    "--project",
+                    str(registry.project_root),
+                    "mcp",
+                    "serve",
+                ],
+                env=dict(os.environ),
+            )
+            async with stdio_client(parameters) as (reader, writer):
+                async with ClientSession(reader, writer) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    resources = await session.list_resources()
+                    factory = await session.call_tool("factory_check", {})
+                    factory_payload = json.loads("\n".join(getattr(item, "text", "") for item in factory.content))
+                    rendered = []
+                    for engine, spec in (
+                        (
+                            "vega-lite",
+                            {
+                                "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+                                "data": {"values": [{"x": "A", "y": 1}]},
+                                "mark": "bar",
+                                "encoding": {
+                                    "x": {"field": "x", "type": "nominal"},
+                                    "y": {"field": "y", "type": "quantitative"},
+                                },
+                            },
+                        ),
+                        (
+                            "vega",
+                            {
+                                "$schema": "https://vega.github.io/schema/vega/v6.json",
+                                "width": 100,
+                                "height": 80,
+                                "data": [{"name": "table", "values": [{"x": 1}]}],
+                                "marks": [{"type": "rect"}],
+                            },
+                        ),
+                    ):
+                        result = await session.call_tool(
+                            "render_visualization_text",
+                            {
+                                "visualization_text": json.dumps(spec),
+                                "engine": engine,
+                                "output_format": "svg",
+                                "force": True,
+                            },
+                        )
+                        payload = json.loads("\n".join(getattr(item, "text", "") for item in result.content))
+                        rendered.append(
+                            not result.isError
+                            and payload.get("ok") is True
+                            and payload.get("rendered") is True
+                        )
+                    tool_names = {tool.name for tool in tools.tools}
+                    resource_uris = {str(resource.uri) for resource in resources.resources}
+                    return {
+                        "ok": factory_payload.get("ok") is True
+                        and all(rendered)
+                        and set(("factory_check", "render_visualization_text")) <= tool_names
+                        and set(("vegavisuals://factory/check", "vegavisuals://factory-manifest")) <= resource_uris,
+                        "tools": len(tool_names),
+                        "resources": len(resource_uris),
+                        "rendered": rendered,
+                    }
+
+        try:
+            return _result(asyncio.run(probe()))
+        except Exception as exc:
+            return _result(
+                {
+                    "ok": False,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
+            )
+    if args.command == "down":
+        return _result(registry.down())
     if args.command == "install-codex-mcp":
         return _result(
             registry.install_codex_mcp(

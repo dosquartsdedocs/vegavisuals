@@ -23,6 +23,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from vegavisuals import __version__
+from vegavisuals.cli import build_parser, dispatch
 from vegavisuals.errors import ManifestError, PolicyError, RenderError, ValidationError
 from vegavisuals.mcp_server import RESOURCE_URIS, TOOL_NAMES, create_server
 from vegavisuals.registry import CONTAINER_LABEL, LOCK_NAME, LOCK_VERSION, MAX_LOCK_BYTES, Registry
@@ -371,11 +372,91 @@ class InventoryTest(TemporaryProject):
     def test_installed_manifest_uses_the_current_python_without_a_factory_makefile(self) -> None:
         with patch("vegavisuals.registry.source_checkout", return_value=None):
             manifest = self.registry.factory_manifest()
+            check = self.registry.factory_check()
         command = manifest["transport"]["command"]
         self.assertEqual(command[:3], [sys.executable, "-m", "vegavisuals.cli"])
         self.assertNotIn("make", command)
         self.assertEqual(manifest["commands"]["init"][-1], "init")
         self.assertEqual(manifest["commands"]["check"][-1], "lifecycle-check")
+        self.assertEqual(manifest["commands"]["tests"][-1], "self-test")
+        self.assertEqual(manifest["commands"]["smoke"][-1], "mcp-smoke")
+        self.assertEqual(manifest["commands"]["down"][-1], "down")
+        self.assertFalse(manifest["discovery"]["checkout_required_for_make_lifecycle"])
+        package_manifest = safe_load(
+            (REPO_ROOT / "src/vegavisuals/factory/mcp-factory.yml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(package_manifest["commands"]), set(manifest["commands"]))
+        self.assertFalse(package_manifest["discovery"]["checkout_required_for_make_lifecycle"])
+        serialized = json.dumps(package_manifest)
+        for forbidden in ("${factoryRoot}", "scripts/factory-launcher", "src/vegavisuals/assets", '"make"'):
+            self.assertNotIn(forbidden, serialized)
+        self.assertTrue(check["ok"], check)
+
+    def test_down_removes_only_valid_factory_container_ids(self) -> None:
+        listed = {
+            "command": ["docker"],
+            "returncode": 0,
+            "stdout": "a" * 12 + "\n" + "b" * 64 + "\n",
+            "stderr": "",
+        }
+        removed = {"command": ["docker"], "returncode": 0, "stdout": "", "stderr": ""}
+        with patch("vegavisuals.registry.shutil.which", return_value="/usr/bin/docker"), patch(
+            "vegavisuals.registry._run_command", side_effect=[listed, removed]
+        ) as runner:
+            result = self.registry.down()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["containers"], ["a" * 12, "b" * 64])
+        self.assertEqual(
+            runner.call_args_list[0].args[0],
+            [
+                "/usr/bin/docker",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                "label=io.context.mcp-factory=vegavisuals",
+            ],
+        )
+        self.assertEqual(
+            runner.call_args_list[1].args[0],
+            ["/usr/bin/docker", "container", "rm", "--force", "a" * 12, "b" * 64],
+        )
+
+    def test_down_rejects_malformed_container_ids_without_removing(self) -> None:
+        listed = {
+            "command": ["docker"],
+            "returncode": 0,
+            "stdout": "not-a-container\n",
+            "stderr": "",
+        }
+        with patch("vegavisuals.registry.shutil.which", return_value="/usr/bin/docker"), patch(
+            "vegavisuals.registry._run_command", return_value=listed
+        ) as runner:
+            result = self.registry.down()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(runner.call_count, 1)
+
+    def test_mcp_smoke_reports_a_missing_optional_dependency_as_json(self) -> None:
+        arguments = build_parser().parse_args(["mcp-smoke"])
+        real_import = __import__
+
+        def import_without_mcp(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if name == "mcp" or name.startswith("mcp."):
+                raise ModuleNotFoundError("No module named 'mcp'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_mcp), patch(
+            "vegavisuals.cli._print"
+        ) as output:
+            status = dispatch(arguments, self.registry)
+
+        self.assertEqual(status, 1)
+        payload = output.call_args.args[0]
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "ModuleNotFoundError")
 
     def test_initialize_is_idempotent_and_force_is_explicit(self) -> None:
         first = self.registry.initialize_project()
