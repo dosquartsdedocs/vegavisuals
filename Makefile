@@ -67,6 +67,7 @@ tests-install: build
 	@wheels=(dist/vegavisuals-*.whl); case "$${wheels[0]}" in *-linux_*.whl) ;; *) printf 'Wheel is not Linux-tagged: %s\n' "$${wheels[0]}" >&2; exit 1 ;; esac
 	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile; wheel=os.environ["WHEEL_PATH"]; archive=zipfile.ZipFile(wheel); metadata=archive.read(next(name for name in archive.namelist() if name.endswith(".dist-info/WHEEL"))).decode(); assert "Root-Is-Purelib: false" in metadata; assert "Tag: py3-none-linux_" in metadata'
 	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile; archive=zipfile.ZipFile(os.environ["WHEEL_PATH"]); names=archive.namelist(); metadata=archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode(); assert "License-Expression: GPL-3.0-only" in metadata; assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names); assert any(name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md") for name in names)'
+	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile,yaml; archive=zipfile.ZipFile(os.environ["WHEEL_PATH"]); manifest=yaml.safe_load(archive.read("vegavisuals/factory/mcp-factory.yml")); assert manifest["version"] == "0.3.1"; assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False; assert {"tests", "smoke", "down"} <= manifest["commands"].keys(); assert "factoryRoot" not in str(manifest); assert all("make" not in command for command in [manifest["transport"]["command"], *manifest["commands"].values()])'
 	@sdists=(dist/vegavisuals-*.tar.gz); SDIST_PATH="$${sdists[0]}" $(PYTHON) -c 'import os,tarfile; names=tarfile.open(os.environ["SDIST_PATH"]).getnames(); assert any(name.endswith("/LICENSE") for name in names); assert any(name.endswith("/THIRD_PARTY_NOTICES.md") for name in names)'
 	@rm -rf .tmp/windows-wheel-check
 	@if $(PYTHON) -m pip download --disable-pip-version-check --no-deps --no-index --find-links dist --only-binary=:all: --dest .tmp/windows-wheel-check --platform win_amd64 --implementation cp --python-version 312 --abi cp312 vegavisuals >/dev/null 2>&1; then printf 'Linux-only wheel was selected for Windows.\n' >&2; exit 1; fi
@@ -78,8 +79,11 @@ tests-install: build
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . install-check --command "$${PWD}/.tmp/install-venv/bin/vegavisuals" >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli --project . install-check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli --project . lifecycle-check >/dev/null
-	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import sys; from vegavisuals import Registry; manifest=Registry(".").factory_manifest(); command=manifest["transport"]["command"]; assert command[:3] == [sys.executable, "-m", "vegavisuals.cli"]; assert "make" not in command'
+	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import sys; from vegavisuals import Registry; manifest=Registry(".").factory_manifest(); command=manifest["transport"]["command"]; assert command[:3] == [sys.executable, "-m", "vegavisuals.cli"]; assert "make" not in command; assert {"tests", "smoke", "down"} <= manifest["commands"].keys(); assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False'
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . factory-check >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . self-test >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . mcp-smoke >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . down >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . render examples/vega-lite/bar.vl.json .cache/vegavisuals/install-check.svg --dry-run >/dev/null
 	@env -u PYTHONPATH VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$${PWD}/.tmp/install-venv/bin/vegavisuals" .tmp/install-venv/bin/python -m unittest tests.test_mcp_stdio

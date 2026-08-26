@@ -297,11 +297,11 @@ update command. An operator can run `vegavisuals update` directly to
 fast-forward a clean checkout; installed wheels only report their explicit pip
 upgrade.
 
-`mcp-factory.yml` is the checkout discovery contract and the installed wheel
-also carries it for diagnostics. The Make lifecycle is intentionally
-checkout-only because it owns the private environment and renderer bootstrap;
-an installed wheel exposes equivalent dynamic metadata with
-`vegavisuals factory-manifest`.
+`mcp-factory.yml` is the checkout discovery contract. Wheels and sdists carry a
+separate package-native manifest that invokes the installed CLI directly and
+provides `tests`, `smoke`, and `down` without Make or checkout paths. Dynamic
+metadata from `vegavisuals factory-manifest` uses the active Python interpreter
+while preserving the same lifecycle contract.
 
 ## Verification
 

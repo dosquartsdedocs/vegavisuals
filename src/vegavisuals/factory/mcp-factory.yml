@@ -1,0 +1,88 @@
+schema_version: 1
+name: vegavisuals
+version: 0.3.1
+kind: codex-mcp-factory
+description: Hardened Docker rendering for themed Vega-Lite and Vega visualizations.
+license: GPL-3.0-only
+repository: https://github.com/dosquartsdedocs/vegavisuals
+factory_assets: ../assets
+workspace_rule:
+  consumer_root: .
+  source_paths:
+    - .vegavisuals.yml
+  generated_paths:
+    - .cache/vegavisuals
+    - .vegavisuals.lock.json
+  init_creates:
+    - .cache/vegavisuals
+    - .vegavisuals.yml
+  allowed_external_writes: []
+runtime:
+  kind: python
+  package_manager: pip
+  package: vegavisuals[mcp]
+  module: vegavisuals
+  mcp_version: 1.29.0
+transport:
+  type: stdio
+  command: [vegavisuals, --project, "${workspaceFolder}", mcp, serve]
+commands:
+  build: [vegavisuals, --project, "${workspaceFolder}", ensure-renderer]
+  init: [vegavisuals, --project, "${workspaceFolder}", init]
+  check: [vegavisuals, --project, "${workspaceFolder}", lifecycle-check]
+  tests: [vegavisuals, --project, "${workspaceFolder}", self-test]
+  smoke: [vegavisuals, --project, "${workspaceFolder}", mcp-smoke]
+  down: [vegavisuals, --project, "${workspaceFolder}", down]
+  update: [vegavisuals, update]
+  release_status: [vegavisuals, --project, "${workspaceFolder}", release-status]
+  install_check: [vegavisuals, --project, "${workspaceFolder}", install-check]
+  install_codex_mcp: [vegavisuals, --project, "${workspaceFolder}", install-codex-mcp, --workspace, "${workspaceFolder}"]
+  factory_check: [vegavisuals, --project, "${workspaceFolder}", factory-check]
+  serve: [vegavisuals, --project, "${workspaceFolder}", mcp, serve]
+  client_config: [vegavisuals, --project, "${workspaceFolder}", mcp, client-config]
+  manifest: [vegavisuals, --project, "${workspaceFolder}", factory-manifest]
+  render: [vegavisuals, --project, "${workspaceFolder}", render]
+  render_all: [vegavisuals, --project, "${workspaceFolder}", render-all]
+mcp:
+  server_name: vegavisuals
+  transport: stdio
+  consumer_root_fixed_at_startup: true
+  required_tools:
+    - initialize_project
+    - validate_visualization
+    - render_visualization
+    - render_visualization_text
+    - visualization_status
+    - visualization_check
+    - render_visualizations
+    - theme_inventory
+    - compatibility_status
+    - factory_check
+    - release_status
+    - update
+    - factory_manifest
+  resources:
+    - vegavisuals://agent-guide
+    - vegavisuals://themes
+    - vegavisuals://compatibility
+    - vegavisuals://project/status
+    - vegavisuals://project/check
+    - vegavisuals://factory/check
+    - vegavisuals://release
+    - vegavisuals://factory-manifest
+discovery:
+  file: mcp-factory.yml
+  suggested_scan_roots: [~/git]
+  checkout_required_for_make_lifecycle: false
+release:
+  default: v0.3.1
+  profile: vl-convert-1.9.0
+  family: benizar
+defaults:
+  profile: vl-convert-1.9.0
+  family: benizar
+contracts:
+  manifest: 1
+  lock: 2
+  inline_cache: 2
+  mcp_errors: typed-application-result
