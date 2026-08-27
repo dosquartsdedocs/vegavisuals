@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import errno
+import gc
+import hashlib
 import inspect
 import json
 import multiprocessing
@@ -23,10 +25,20 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from vegavisuals import __version__
-from vegavisuals.cli import build_parser, dispatch
+from vegavisuals.cli import build_parser, dispatch, main
 from vegavisuals.errors import ManifestError, PolicyError, RenderError, ValidationError
 from vegavisuals.mcp_server import RESOURCE_URIS, TOOL_NAMES, create_server
-from vegavisuals.registry import CONTAINER_LABEL, LOCK_NAME, LOCK_VERSION, MAX_LOCK_BYTES, Registry
+from vegavisuals.registry import (
+    CONTAINER_LABEL,
+    CONTAINER_WORKSPACE_LABEL,
+    DEFAULT_RELEASE,
+    LOCK_NAME,
+    LOCK_VERSION,
+    MAX_LOCK_BYTES,
+    RECEIPT_PATH,
+    Registry,
+    workspace_id,
+)
 
 
 def write(path: pathlib.Path, value: str | bytes) -> None:
@@ -377,10 +389,15 @@ class InventoryTest(TemporaryProject):
         self.assertEqual(command[:3], [sys.executable, "-m", "vegavisuals.cli"])
         self.assertNotIn("make", command)
         self.assertEqual(manifest["commands"]["init"][-1], "init")
-        self.assertEqual(manifest["commands"]["check"][-1], "lifecycle-check")
+        self.assertEqual(manifest["commands"]["check"][-1], "factory-lifecycle-check")
         self.assertEqual(manifest["commands"]["tests"][-1], "self-test")
         self.assertEqual(manifest["commands"]["smoke"][-1], "mcp-smoke")
         self.assertEqual(manifest["commands"]["down"][-1], "down")
+        self.assertEqual(manifest["commands"]["down_all"][-1], "down-all")
+        for name in ("build", "check", "tests", "smoke", "down_all", "client_config", "manifest"):
+            self.assertNotIn("${workspaceFolder}", manifest["commands"][name])
+        for name in ("init", "down", "serve", "render", "render_all"):
+            self.assertIn("${workspaceFolder}", manifest["commands"][name])
         self.assertFalse(manifest["discovery"]["checkout_required_for_make_lifecycle"])
         package_manifest = safe_load(
             (REPO_ROOT / "src/vegavisuals/factory/mcp-factory.yml").read_text(encoding="utf-8")
@@ -391,6 +408,37 @@ class InventoryTest(TemporaryProject):
         for forbidden in ("${factoryRoot}", "scripts/factory-launcher", "src/vegavisuals/assets", '"make"'):
             self.assertNotIn(forbidden, serialized)
         self.assertTrue(check["ok"], check)
+
+    def test_checkout_manifest_scopes_only_project_operations(self) -> None:
+        manifest = self.registry.factory_manifest()
+        launcher = ["bash", "${factoryRoot}/scripts/factory-launcher"]
+
+        self.assertEqual(manifest["commands"]["build"], [*launcher, "build"])
+        self.assertEqual(manifest["commands"]["check"], [*launcher, "check"])
+        self.assertEqual(manifest["commands"]["smoke"], [*launcher, "smoke"])
+        self.assertEqual(manifest["commands"]["manifest"], [*launcher, "manifest"])
+        self.assertEqual(manifest["commands"]["client_config"], [*launcher, "client-config"])
+        self.assertEqual(
+            manifest["commands"]["down"],
+            [*launcher, "down", "${workspaceFolder}"],
+        )
+        self.assertEqual(manifest["commands"]["down_all"], [*launcher, "down-all"])
+        self.assertEqual(
+            manifest["transport"]["command"],
+            [*launcher, "serve", "${workspaceFolder}"],
+        )
+
+    def test_manifest_and_client_config_ignore_a_nonexistent_workspace_placeholder(self) -> None:
+        placeholder = "${workspaceFolder}"
+        self.assertFalse(pathlib.Path(placeholder).exists())
+
+        with patch("vegavisuals.cli._print") as output:
+            self.assertEqual(main(["--project", placeholder, "factory-manifest"]), 0)
+            self.assertTrue(output.call_args.args[0]["ok"])
+        with patch("vegavisuals.cli._print") as output:
+            self.assertEqual(main(["--project", placeholder, "mcp", "client-config"]), 0)
+            server = output.call_args.args[0]["mcpServers"]["vegavisuals"]
+            self.assertIn(placeholder, server["args"])
 
     def test_down_removes_only_valid_factory_container_ids(self) -> None:
         listed = {
@@ -417,11 +465,44 @@ class InventoryTest(TemporaryProject):
                 "--quiet",
                 "--filter",
                 "label=io.context.mcp-factory=vegavisuals",
+                "--filter",
+                f"label=io.context.mcp-factory.workspace={workspace_id(self.root)}",
             ],
         )
         self.assertEqual(
             runner.call_args_list[1].args[0],
             ["/usr/bin/docker", "container", "rm", "--force", "a" * 12, "b" * 64],
+        )
+        self.assertEqual(result["workspace"], workspace_id(self.root))
+        self.assertFalse(result["all_workspaces"])
+
+    def test_down_all_requires_explicit_factory_wide_cleanup(self) -> None:
+        listed = {
+            "command": ["docker"],
+            "returncode": 0,
+            "stdout": "a" * 12 + "\n",
+            "stderr": "",
+        }
+        removed = {"command": ["docker"], "returncode": 0, "stdout": "", "stderr": ""}
+        with patch("vegavisuals.registry.shutil.which", return_value="/usr/bin/docker"), patch(
+            "vegavisuals.registry._run_command", side_effect=[listed, removed]
+        ) as runner:
+            result = self.registry.down_all()
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["all_workspaces"])
+        self.assertIsNone(result["workspace"])
+        self.assertEqual(
+            runner.call_args_list[0].args[0],
+            [
+                "/usr/bin/docker",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                "label=io.context.mcp-factory=vegavisuals",
+            ],
         )
 
     def test_down_rejects_malformed_container_ids_without_removing(self) -> None:
@@ -631,7 +712,7 @@ class PathAndPolicyTest(TemporaryProject):
             self.registry.render_visualization("chart.vl.json", "../chart.svg", dry_run=True)
 
     def test_local_data_is_staged_inline_and_fingerprinted(self) -> None:
-        write(self.root / "charts" / "chart.vl.json", vl_spec("data/table.csv"))
+        write(self.root / "charts" / "chart.vl.json", vl_spec("charts/data/table.csv"))
         write(self.root / "charts" / "data" / "table.csv", "x,y\nA,1\n")
         result = self.registry.render_visualization("charts/chart.vl.json", "out/chart.svg")
         self.assertTrue(result["ok"])
@@ -680,12 +761,14 @@ class PathAndPolicyTest(TemporaryProject):
         self.assertFalse((self.root / "new.txt").exists())
 
     def test_temporary_name_failure_does_not_leak_transaction_descriptor(self) -> None:
+        gc.collect()
         before = len(list(pathlib.Path("/proc/self/fd").iterdir()))
 
         with patch("vegavisuals.registry.secrets.token_hex", side_effect=RuntimeError("token failure")):
             with self.assertRaisesRegex(RuntimeError, "token failure"):
                 self.registry._replace_project_bytes("new.txt", b"new")
 
+        gc.collect()
         self.assertEqual(len(list(pathlib.Path("/proc/self/fd").iterdir())), before)
 
     def test_recovery_filesystem_mismatch_fails_before_publication(self) -> None:
@@ -701,7 +784,7 @@ class PathAndPolicyTest(TemporaryProject):
 
     def test_raw_vega_local_data_uses_the_same_staging_policy(self) -> None:
         spec = json.loads(vg_spec())
-        spec["data"] = [{"name": "table", "url": "data/table.json"}]
+        spec["data"] = [{"name": "table", "url": "charts/data/table.json"}]
         write(self.root / "charts" / "chart.vg.json", json.dumps(spec))
         write(self.root / "charts" / "data" / "table.json", '[{"x": 1}]\n')
         result = self.registry.render_visualization("charts/chart.vg.json", "out/chart.svg")
@@ -970,7 +1053,9 @@ class DockerCommandTest(TemporaryProject):
         self.assertRegex(command[command.index("--workdir") + 2], r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("bash", command)
         self.assertNotIn("sh", command)
-        self.assertEqual(command[command.index("--label") + 1], CONTAINER_LABEL)
+        labels = [command[index + 1] for index, item in enumerate(command) if item == "--label"]
+        self.assertIn(CONTAINER_LABEL, labels)
+        self.assertIn(f"{CONTAINER_WORKSPACE_LABEL}={workspace_id(self.root)}", labels)
 
     def test_project_path_with_commas_is_not_interpolated_into_mount_syntax(self) -> None:
         root = self.root / "consumer,with,commas"
@@ -1373,6 +1458,177 @@ class LockAndManifestTest(TemporaryProject):
             ],
         }
         write(self.root / ".vegavisuals.yml", safe_dump(manifest, sort_keys=False))
+
+    def _receipt_manifest(self) -> None:
+        write(self.root / "charts/chart.vl.json", vl_spec("assets/data/table.csv"))
+        write(self.root / "assets/charts/unlisted.vl.json", vl_spec("assets/data/unlisted.csv"))
+        write(self.root / "assets/data/table.csv", "x,y\nA,1\n")
+        write(self.root / "assets/data/unlisted.csv", "x,y\nB,2\n")
+        write(self.root / "assets/data/global.csv", "global\n1\n")
+        write(self.root / "assets/data/item.csv", "item\n1\n")
+        manifest = {
+            "version": 1,
+            "profile": "vl-convert-1.9.0",
+            "family": "benizar",
+            "inputs": ["assets/data/global.csv"],
+            "visualizations": [
+                {
+                    "name": "chart",
+                    "source": "charts/chart.vl.json",
+                    "output": "assets/charts/chart.svg",
+                    "inputs": ["assets/data/item.csv"],
+                }
+            ],
+        }
+        write(self.root / ".vegavisuals.yml", safe_dump(manifest, sort_keys=False))
+
+    def test_successful_check_publishes_exact_bounded_receipt(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+
+        checked = self.registry.visualization_check()
+
+        self.assertTrue(checked["ok"], checked)
+        receipt = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(receipt),
+            {
+                "schema_version",
+                "provider",
+                "provider_version",
+                "release",
+                "request_sha256",
+                "ok",
+                "inputs",
+                "artifacts",
+            },
+        )
+        self.assertEqual(receipt["schema_version"], 1)
+        self.assertEqual(receipt["provider"], "vegavisuals")
+        self.assertEqual(receipt["provider_version"], __version__)
+        self.assertEqual(receipt["release"], DEFAULT_RELEASE)
+        self.assertIs(receipt["ok"], True)
+        self.assertEqual(
+            {item["path"] for item in receipt["inputs"]},
+            {
+                "assets/data/global.csv",
+                "assets/data/item.csv",
+                "assets/data/table.csv",
+                "assets/data/unlisted.csv",
+            },
+        )
+        self.assertEqual([item["path"] for item in receipt["artifacts"]], ["assets/charts/chart.svg"])
+
+        digest = hashlib.sha256()
+        digest.update(b"unaltraweb-companion-receipt-v1\0vegavisuals\0")
+        for relative in [
+            ".vegavisuals.yml",
+            "assets/charts/unlisted.vl.json",
+            "charts/chart.vl.json",
+        ]:
+            path_bytes = relative.encode("utf-8")
+            content = (self.root / relative).read_bytes()
+            digest.update(len(path_bytes).to_bytes(8, "big"))
+            digest.update(path_bytes)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        self.assertEqual(receipt["request_sha256"], digest.hexdigest())
+        self.assertLess((self.root / RECEIPT_PATH).stat().st_size, 256 * 1024)
+
+    def test_receipt_inventory_cannot_omit_explicit_or_discovered_dependencies(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+
+        self.registry.visualization_check()
+        receipt = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+
+        expected = {
+            relative: hashlib.sha256((self.root / relative).read_bytes()).hexdigest()
+            for relative in [
+                "assets/data/global.csv",
+                "assets/data/item.csv",
+                "assets/data/table.csv",
+                "assets/data/unlisted.csv",
+            ]
+        }
+        self.assertEqual({item["path"]: item["sha256"] for item in receipt["inputs"]}, expected)
+
+    def test_dataset_change_invalidates_then_updates_receipt(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+        self.registry.visualization_check()
+        before = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+        before_inputs = {item["path"]: item["sha256"] for item in before["inputs"]}
+
+        write(self.root / "assets/data/table.csv", "x,y\nA,2\n")
+        failed = self.registry.visualization_check()
+
+        self.assertFalse(failed["ok"])
+        self.assertIs(json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))["ok"], False)
+        self.registry.render_visualizations()
+        self.registry.visualization_check()
+        after = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+        after_inputs = {item["path"]: item["sha256"] for item in after["inputs"]}
+        self.assertEqual(after["request_sha256"], before["request_sha256"])
+        self.assertNotEqual(after_inputs["assets/data/table.csv"], before_inputs["assets/data/table.csv"])
+
+    def test_failed_check_invalidates_stale_owned_receipt(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+        self.registry.visualization_check()
+        (self.root / "assets/charts/chart.svg").unlink()
+
+        checked = self.registry.visualization_check()
+
+        self.assertFalse(checked["ok"])
+        invalid = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+        self.assertEqual(invalid, {"schema_version": 1, "provider": "vegavisuals", "ok": False})
+
+    def test_source_race_cannot_publish_a_receipt_for_a_stale_artifact(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+        self.registry.visualization_check()
+        original = self.registry._receipt_payload
+
+        def change_source_after_validation(manifest, status):
+            source = self.root / "charts/chart.vl.json"
+            write(source, source.read_text(encoding="utf-8") + "\n")
+            return original(manifest, status)
+
+        with patch.object(self.registry, "_receipt_payload", side_effect=change_source_after_validation):
+            with self.assertRaisesRegex(RenderError, "source changed after validation"):
+                self.registry.visualization_check()
+
+        invalid = json.loads((self.root / RECEIPT_PATH).read_text(encoding="utf-8"))
+        self.assertIs(invalid["ok"], False)
+
+    def test_receipt_parent_symlink_cannot_escape_project(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+        with tempfile.TemporaryDirectory(prefix="vegavisuals-receipt-outside-") as outside_raw:
+            outside = pathlib.Path(outside_raw)
+            (self.root / ".unaltraweb").mkdir()
+            (self.root / ".unaltraweb/receipts").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(PolicyError, "symlinked parent"):
+                self.registry.visualization_check()
+
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_receipt_target_symlink_is_replaced_without_following_it(self) -> None:
+        self._receipt_manifest()
+        self.registry.render_visualizations()
+        with tempfile.TemporaryDirectory(prefix="vegavisuals-receipt-target-") as outside_raw:
+            outside = pathlib.Path(outside_raw) / "outside.json"
+            outside.write_text('{"outside":true}\n', encoding="utf-8")
+            (self.root / ".unaltraweb/receipts").mkdir(parents=True)
+            (self.root / RECEIPT_PATH).symlink_to(outside)
+
+            checked = self.registry.visualization_check()
+
+            self.assertTrue(checked["ok"], checked)
+            self.assertFalse((self.root / RECEIPT_PATH).is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), '{"outside":true}\n')
 
     def test_manifest_status_render_all_and_check(self) -> None:
         self._manifest()

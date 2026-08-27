@@ -61,9 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     install_check.add_argument("--command", dest="executable", default="")
     lifecycle_check = commands.add_parser("lifecycle-check", help="Validate installation, factory, and consumer")
     lifecycle_check.add_argument("--command", dest="executable", default="")
+    factory_lifecycle_check = commands.add_parser(
+        "factory-lifecycle-check", help="Validate installation and factory without a consumer project"
+    )
+    factory_lifecycle_check.add_argument("--command", dest="executable", default="")
+    _add_contract_options(factory_lifecycle_check)
     commands.add_parser("self-test", help="Run package-native factory and validation checks")
     commands.add_parser("mcp-smoke", help="Probe MCP stdio and render both engines")
-    commands.add_parser("down", help="Remove containers owned by the vegavisuals factory")
+    commands.add_parser("down", help="Remove renderer containers for the selected project")
+    commands.add_parser("down-all", help="Remove renderer containers for every project")
     install_codex = commands.add_parser("install-codex-mcp", help="Install the startup-fixed MCP in Codex")
     install_codex.add_argument("--name", default="vegavisuals")
     install_codex.add_argument("--codex-bin", default="codex")
@@ -142,11 +148,20 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
         return _result(registry.install_check(args.executable))
     if args.command == "lifecycle-check":
         return _result(registry.lifecycle_check(args.executable))
+    if args.command == "factory-lifecycle-check":
+        return _result(
+            registry.factory_lifecycle_check(
+                args.executable,
+                profile=args.profile,
+                family=args.family,
+            )
+        )
     if args.command == "self-test":
         return _result(registry.self_test())
     if args.command == "mcp-smoke":
         import asyncio
         import os
+        import tempfile
 
         try:
             from mcp import ClientSession, StdioServerParameters
@@ -162,14 +177,14 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                 }
             )
 
-        async def probe() -> dict[str, Any]:
+        async def probe(project_root: str) -> dict[str, Any]:
             parameters = StdioServerParameters(
                 command=sys.executable,
                 args=[
                     "-m",
                     "vegavisuals.cli",
                     "--project",
-                    str(registry.project_root),
+                    project_root,
                     "mcp",
                     "serve",
                 ],
@@ -235,7 +250,8 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                     }
 
         try:
-            return _result(asyncio.run(probe()))
+            with tempfile.TemporaryDirectory(prefix="vegavisuals-mcp-smoke-") as project_root:
+                return _result(asyncio.run(probe(project_root)))
         except Exception as exc:
             return _result(
                 {
@@ -245,6 +261,8 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
             )
     if args.command == "down":
         return _result(registry.down())
+    if args.command == "down-all":
+        return _result(registry.down_all())
     if args.command == "install-codex-mcp":
         return _result(
             registry.install_codex_mcp(
@@ -357,7 +375,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        registry = Registry(args.project)
+        project = "." if args.command == "factory-manifest" or (
+            args.command == "mcp" and args.mcp_command == "client-config"
+        ) else args.project
+        registry = Registry(project)
         return dispatch(args, registry)
     except RecursionError as exc:
         _print(

@@ -13,6 +13,7 @@ workspace_rule:
   generated_paths:
     - .cache/vegavisuals
     - .vegavisuals.lock.json
+    - .unaltraweb/receipts/vegavisuals.json
   init_creates:
     - .cache/vegavisuals
     - .vegavisuals.yml
@@ -27,20 +28,21 @@ transport:
   type: stdio
   command: [vegavisuals, --project, "${workspaceFolder}", mcp, serve]
 commands:
-  build: [vegavisuals, --project, "${workspaceFolder}", ensure-renderer]
+  build: [vegavisuals, ensure-renderer]
   init: [vegavisuals, --project, "${workspaceFolder}", init]
-  check: [vegavisuals, --project, "${workspaceFolder}", lifecycle-check]
-  tests: [vegavisuals, --project, "${workspaceFolder}", self-test]
-  smoke: [vegavisuals, --project, "${workspaceFolder}", mcp-smoke]
+  check: [vegavisuals, factory-lifecycle-check]
+  tests: [vegavisuals, self-test]
+  smoke: [vegavisuals, mcp-smoke]
   down: [vegavisuals, --project, "${workspaceFolder}", down]
+  down_all: [vegavisuals, down-all]
   update: [vegavisuals, update]
-  release_status: [vegavisuals, --project, "${workspaceFolder}", release-status]
-  install_check: [vegavisuals, --project, "${workspaceFolder}", install-check]
+  release_status: [vegavisuals, release-status]
+  install_check: [vegavisuals, install-check]
   install_codex_mcp: [vegavisuals, --project, "${workspaceFolder}", install-codex-mcp, --workspace, "${workspaceFolder}"]
-  factory_check: [vegavisuals, --project, "${workspaceFolder}", factory-check]
+  factory_check: [vegavisuals, factory-check]
   serve: [vegavisuals, --project, "${workspaceFolder}", mcp, serve]
-  client_config: [vegavisuals, --project, "${workspaceFolder}", mcp, client-config]
-  manifest: [vegavisuals, --project, "${workspaceFolder}", factory-manifest]
+  client_config: [vegavisuals, mcp, client-config]
+  manifest: [vegavisuals, factory-manifest]
   render: [vegavisuals, --project, "${workspaceFolder}", render]
   render_all: [vegavisuals, --project, "${workspaceFolder}", render-all]
 mcp:
@@ -85,4 +87,5 @@ contracts:
   manifest: 1
   lock: 2
   inline_cache: 2
+  receipt: 1
   mcp_errors: typed-application-result

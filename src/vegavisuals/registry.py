@@ -40,11 +40,19 @@ REPOSITORY_URL = "https://github.com/dosquartsdedocs/vegavisuals"
 MCP_VERSION = "1.29.0"
 MANIFEST_NAME = ".vegavisuals.yml"
 LOCK_NAME = ".vegavisuals.lock.json"
+RECEIPT_PATH = ".unaltraweb/receipts/vegavisuals.json"
 LOCK_VERSION = 2
 CACHE_VERSION = 2
 MAX_LOCK_BYTES = 4 * 1024 * 1024
+MAX_RECEIPT_BYTES = 256 * 1024
+MAX_RECEIPT_FILES = 500
+MAX_RECEIPT_FILE_BYTES = 16 * 1024 * 1024
+MAX_RECEIPT_TOTAL_BYTES = 256 * 1024 * 1024
+RECEIPT_JSON_MAX_DEPTH = 64
+RECEIPT_JSON_MAX_NODES = 100_000
 PROJECT_LOCK_PATH = ".cache/vegavisuals/project.lock"
 CONTAINER_LABEL = "io.context.mcp-factory=vegavisuals"
+CONTAINER_WORKSPACE_LABEL = "io.context.mcp-factory.workspace"
 RENDERER_CONTRACT_LABEL = "io.vegavisuals.renderer-contract"
 MAX_JSON_DEPTH = 128
 RENAME_NOREPLACE = 1
@@ -65,6 +73,7 @@ SAFE_ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SAFE_VISUALIZATION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+VEGA_SOURCE_SUFFIXES = (".vl.json", ".vg.json")
 VEGA_LITE_SCHEMA_RE = re.compile(
     r"^https://vega\.github\.io/schema/vega-lite/v(?P<version>[0-9]+(?:\.[0-9]+)?)\.json$",
     re.IGNORECASE,
@@ -334,6 +343,10 @@ def _relative(path: pathlib.Path, root: pathlib.Path) -> str:
 
 def _path_within(path: pathlib.Path, root: pathlib.Path) -> bool:
     return path == root or root in path.parents
+
+
+def workspace_id(project_root: pathlib.Path) -> str:
+    return hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()[:12]
 
 
 class _ProjectPublication:
@@ -624,7 +637,9 @@ class Registry:
         parsed = urllib.parse.urlsplit(raw)
         candidate = pathlib.Path(raw)
         if (
-            candidate.is_absolute()
+            raw != raw.strip()
+            or "\\" in raw
+            or candidate.is_absolute()
             or ".." in candidate.parts
             or parsed.scheme
             or parsed.netloc
@@ -633,6 +648,24 @@ class Registry:
         ):
             raise ManifestError(f"{description} must be a safe project-relative path: {raw}")
         return self._project_write_relative(raw, description=description)
+
+    def _dependency_project_relative(self, raw: Any, *, description: str) -> str:
+        if not isinstance(raw, str) or not raw.strip() or raw != raw.strip():
+            raise ValidationError(f"{description} must be a non-empty project-relative string")
+        parsed = urllib.parse.urlsplit(raw)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or any(character in raw for character in "${}")
+        ):
+            raise PolicyError(f"{description} must be a static project-relative path: {raw}")
+        decoded = urllib.parse.unquote(parsed.path)
+        candidate = pathlib.Path(decoded)
+        if "\\" in decoded or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise PolicyError(f"{description} must be a confined project-relative path: {raw}")
+        return self._project_write_relative(decoded, description=description)
 
     @contextmanager
     def _open_project_parent(self, relative: str, *, create: bool) -> Iterable[tuple[int, str]]:
@@ -1067,6 +1100,66 @@ class Registry:
         data = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
         publication = self._replace_project_bytes(relative, data)
         publication.commit()
+
+    def _publish_owned_project_bytes(self, relative: str, data: bytes, *, max_bytes: int) -> None:
+        if len(data) > max_bytes:
+            raise ValidationError(f"owned project file exceeds {max_bytes} bytes: {relative}")
+        with self._open_project_parent(relative, create=True) as (parent_fd, name):
+            temporary = f".{name}.{secrets.token_hex(12)}.tmp"
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o644,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    view = memoryview(data)
+                    while view:
+                        written = os.write(descriptor, view)
+                        view = view[written:]
+                    os.fchmod(descriptor, 0o644)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                candidate, _ = self._read_regular_at(
+                    parent_fd,
+                    temporary,
+                    description=f"owned publication candidate for {relative}",
+                    max_bytes=max_bytes,
+                    collect=False,
+                )
+                if candidate.sha256 != _sha256_bytes(data) or candidate.size != len(data):
+                    raise RenderError(f"owned publication candidate changed before installation: {relative}")
+                try:
+                    target = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    target = None
+                if target is not None and stat.S_ISDIR(target.st_mode):
+                    raise PolicyError(f"refusing to replace a directory at owned project path: {relative}")
+                os.rename(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                temporary = ""
+                os.fsync(parent_fd)
+            finally:
+                if temporary:
+                    try:
+                        os.unlink(temporary, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+
+    def _invalidate_receipt(self) -> None:
+        try:
+            with self._open_project_parent(RECEIPT_PATH, create=False) as (parent_fd, name):
+                try:
+                    target = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                if stat.S_ISDIR(target.st_mode):
+                    return
+        except (FileNotFoundError, PolicyError):
+            return
+        invalid = _json_bytes({"schema_version": 1, "provider": "vegavisuals", "ok": False}) + b"\n"
+        self._publish_owned_project_bytes(RECEIPT_PATH, invalid, max_bytes=MAX_RECEIPT_BYTES)
 
     def _asset_path(self, category: str, name: str) -> pathlib.Path:
         normalized = name.removesuffix(".json")
@@ -1609,10 +1702,9 @@ class Registry:
                     raise PolicyError(f"local data URL must be project-relative: {raw_url}")
                 if source is None:
                     raise ValidationError("local data resolution requires a source path")
-                source_parent = pathlib.PurePosixPath(source).parent
-                local_relative = self._project_write_relative(
-                    (source_parent / decoded).as_posix(),
-                    description="local data file",
+                local_relative = self._dependency_project_relative(
+                    raw_url,
+                    description="local data URL",
                 )
                 snapshot = dependency_paths.get(local_relative)
                 if snapshot is None:
@@ -1716,7 +1808,7 @@ class Registry:
         by_path = {item["path"]: item for item in dependencies}
         total = sum(int(item["bytes"]) for item in dependencies)
         for raw in inputs:
-            relative = self._project_write_relative(raw, description="visualization input")
+            relative = self._dependency_project_relative(raw, description="visualization input")
             if relative not in by_path:
                 remaining = max_dependency_bytes - total
                 if remaining < 0:
@@ -2034,6 +2126,7 @@ class Registry:
     ) -> list[str]:
         uid, gid = self._container_user()
         limits = profile_data["runtime_limits"]
+        project_id = workspace_id(self.project_root)
         return [
             "docker",
             "run",
@@ -2044,6 +2137,8 @@ class Registry:
             "never",
             "--label",
             CONTAINER_LABEL,
+            "--label",
+            f"{CONTAINER_WORKSPACE_LABEL}={project_id}",
             "--network",
             "none",
             "--read-only",
@@ -3200,7 +3295,8 @@ class Registry:
             raise ManifestError(f"invalid visualization manifest: {exc}") from exc
         if not isinstance(value, dict):
             raise ManifestError("visualization manifest must be an object")
-        if set(value) != {"version", "profile", "family", "visualizations"}:
+        required_fields = {"version", "profile", "family", "visualizations"}
+        if not required_fields <= set(value) or set(value) - {*required_fields, "inputs"}:
             raise ManifestError("visualization manifest has missing or unknown root fields")
         if type(value.get("version")) is not int or value.get("version") != 1:
             raise ManifestError("visualization manifest version must be 1")
@@ -3216,6 +3312,34 @@ class Registry:
         limits = profile_data["runtime_limits"]
         if not isinstance(visualizations, list):
             raise ManifestError("visualization manifest visualizations must be a list")
+
+        def normalize_inputs(raw_inputs: Any, context: str) -> list[str]:
+            if not isinstance(raw_inputs, list) or not all(isinstance(entry, str) and entry for entry in raw_inputs):
+                raise ManifestError(f"{context} inputs must be a list of paths")
+            try:
+                normalized = [
+                    self._dependency_project_relative(entry, description=f"input for {context}")
+                    for entry in raw_inputs
+                ]
+            except ValidationError as exc:
+                raise ManifestError(str(exc)) from exc
+            if len(normalized) != len(set(normalized)):
+                raise ManifestError(f"{context} has duplicate inputs")
+            total = 0
+            for entry in normalized:
+                result = self._project_file_hash(
+                    entry,
+                    max_bytes=int(limits["max_dependency_bytes"]),
+                    description=f"input for {context}",
+                )
+                if result is None:
+                    raise ManifestError(f"{context} references a missing input")
+                total += result[1]
+                if total > int(limits["max_dependency_bytes"]):
+                    raise ManifestError(f"{context} inputs exceed the dependency byte limit")
+            return normalized
+
+        manifest_inputs = normalize_inputs(value.get("inputs", []), "visualization manifest")
 
         normalized_items: list[dict[str, Any]] = []
         names: set[str] = set()
@@ -3264,25 +3388,7 @@ class Registry:
             if item_format is not None and not isinstance(item_format, str):
                 raise ManifestError(f"visualization {name} format must be a string")
             resolved_format = self._resolve_format(output_resolved, item_format)
-            inputs = item.get("inputs", [])
-            if not isinstance(inputs, list) or not all(isinstance(entry, str) and entry for entry in inputs):
-                raise ManifestError(f"visualization {name} inputs must be a list of paths")
-            normalized_inputs = [
-                self._manifest_project_relative(entry, description=f"input for {name}")
-                for entry in inputs
-            ]
-            if any(
-                self._project_file_hash(
-                    entry,
-                    max_bytes=int(limits["max_dependency_bytes"]),
-                    description=f"input for {name}",
-                )
-                is None
-                for entry in normalized_inputs
-            ):
-                raise ManifestError(f"visualization {name} references a missing input")
-            if len(normalized_inputs) != len(set(normalized_inputs)):
-                raise ManifestError(f"visualization {name} has duplicate inputs")
+            normalized_inputs = normalize_inputs(item.get("inputs", []), f"visualization {name}")
             names.add(name)
             sources.add(source_relative)
             outputs.add(output_relative)
@@ -3293,16 +3399,227 @@ class Registry:
                     "output": output_relative,
                     "engine": item_engine,
                     "format": resolved_format,
-                    "inputs": normalized_inputs,
+                    "inputs": sorted(set(manifest_inputs) | set(normalized_inputs)),
                 }
             )
         return {
             "version": 1,
             "path": relative,
+            "sha256": _sha256_bytes(raw),
             "profile": profile,
             "family": family,
+            "inputs": manifest_inputs,
             "visualizations": normalized_items,
         }
+
+    def _receipt_source_paths(self, manifest: dict[str, Any]) -> list[str]:
+        sources = {
+            manifest["path"],
+            *(item["source"] for item in manifest["visualizations"]),
+        }
+        if len(sources) > MAX_RECEIPT_FILES + 1:
+            raise ValidationError(f"receipt request exceeds {MAX_RECEIPT_FILES} Vega sources")
+        try:
+            assets_stat = os.stat("assets", dir_fd=self._project_root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return sorted(sources)
+        if stat.S_ISLNK(assets_stat.st_mode):
+            raise PolicyError("receipt source root must not be a symlink: assets")
+        if not stat.S_ISDIR(assets_stat.st_mode):
+            return sorted(sources)
+
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            assets_fd = os.open("assets", flags, dir_fd=self._project_root_fd)
+        except OSError as exc:
+            raise PolicyError("receipt source root cannot be opened safely: assets") from exc
+        nodes = 0
+
+        def walk(directory_fd: int, prefix: pathlib.PurePosixPath, depth: int) -> None:
+            nonlocal nodes
+            if depth > RECEIPT_JSON_MAX_DEPTH:
+                raise ValidationError("receipt source discovery exceeds its directory depth limit")
+            try:
+                names = sorted(os.listdir(directory_fd))
+            except OSError as exc:
+                raise ValidationError(f"cannot list receipt source directory: {prefix}") from exc
+            for name in names:
+                nodes += 1
+                if nodes > RECEIPT_JSON_MAX_NODES:
+                    raise ValidationError("receipt source discovery exceeds its entry limit")
+                relative = (prefix / name).as_posix()
+                try:
+                    entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise ValidationError(f"cannot inspect receipt source path: {relative}") from exc
+                if stat.S_ISLNK(entry.st_mode):
+                    if name.lower().endswith(VEGA_SOURCE_SUFFIXES):
+                        raise PolicyError(f"receipt source must not be a symlink: {relative}")
+                    continue
+                if stat.S_ISDIR(entry.st_mode):
+                    try:
+                        child_fd = os.open(name, flags, dir_fd=directory_fd)
+                    except OSError as exc:
+                        raise PolicyError(f"receipt source directory cannot be opened safely: {relative}") from exc
+                    try:
+                        walk(child_fd, pathlib.PurePosixPath(relative), depth + 1)
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISREG(entry.st_mode) and name.lower().endswith(VEGA_SOURCE_SUFFIXES):
+                    sources.add(relative)
+                    if len(sources) > MAX_RECEIPT_FILES + 1:
+                        raise ValidationError(f"receipt request exceeds {MAX_RECEIPT_FILES} Vega sources")
+
+        try:
+            walk(assets_fd, pathlib.PurePosixPath("assets"), 0)
+        finally:
+            os.close(assets_fd)
+        return sorted(sources)
+
+    def _receipt_data_paths(self, source: str, raw: bytes) -> list[str]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError(f"receipt source must be UTF-8 JSON: {source}") from exc
+        value = _load_json_text(text, source)
+        if not isinstance(value, dict):
+            raise ValidationError(f"receipt source must contain a JSON object: {source}")
+        paths: set[str] = set()
+        nodes = 0
+        stack: list[tuple[Any, int, bool]] = [(value, 0, False)]
+        while stack:
+            node, depth, data_context = stack.pop()
+            nodes += 1
+            if nodes > RECEIPT_JSON_MAX_NODES:
+                raise ValidationError(f"receipt source exceeds the {RECEIPT_JSON_MAX_NODES}-node limit: {source}")
+            if depth > RECEIPT_JSON_MAX_DEPTH:
+                raise ValidationError(f"receipt source exceeds the {RECEIPT_JSON_MAX_DEPTH}-level limit: {source}")
+            if isinstance(node, dict):
+                if data_context and "url" in node:
+                    paths.add(
+                        self._dependency_project_relative(
+                            node["url"],
+                            description=f"data.url in {source}",
+                        )
+                    )
+                for key, child in node.items():
+                    stack.append((child, depth + 1, key == "data"))
+            elif isinstance(node, list):
+                for child in node:
+                    stack.append((child, depth + 1, data_context))
+        return sorted(paths)
+
+    def _receipt_payload(
+        self,
+        manifest: dict[str, Any],
+        status: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, _FileSnapshot]]:
+        snapshots: dict[str, _FileSnapshot] = {}
+        source_contents: dict[str, bytes] = {}
+        total_bytes = 0
+
+        def read_snapshot(relative: str, description: str, *, collect: bool) -> bytes | None:
+            nonlocal total_bytes
+            if relative in snapshots:
+                return source_contents.get(relative) if collect else None
+            result = self._read_project_snapshot(
+                relative,
+                description=description,
+                max_bytes=MAX_RECEIPT_FILE_BYTES,
+                collect=collect,
+                missing_ok=False,
+            )
+            assert result is not None
+            snapshot, content = result
+            total_bytes += snapshot.size
+            if total_bytes > MAX_RECEIPT_TOTAL_BYTES:
+                raise ValidationError(f"receipt files exceed {MAX_RECEIPT_TOTAL_BYTES} total bytes")
+            snapshots[relative] = snapshot
+            if content is not None:
+                source_contents[relative] = content
+            return content
+
+        request_sources = self._receipt_source_paths(manifest)
+        digest = hashlib.sha256()
+        digest.update(b"unaltraweb-companion-receipt-v1\0vegavisuals\0")
+        for relative in request_sources:
+            content = read_snapshot(relative, "receipt request source", collect=True)
+            assert content is not None
+            encoded = relative.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        if manifest["sha256"] != status["manifest_sha256"] or snapshots[manifest["path"]].sha256 != manifest["sha256"]:
+            raise RenderError("visualization manifest changed after freshness validation")
+
+        input_paths = set(manifest["inputs"])
+        for item in manifest["visualizations"]:
+            input_paths.update(item["inputs"])
+        for item in status["visualizations"]:
+            input_paths.update(dependency["path"] for dependency in item.get("dependencies", []))
+        for relative in request_sources:
+            if relative.lower().endswith(VEGA_SOURCE_SUFFIXES):
+                input_paths.update(self._receipt_data_paths(relative, source_contents[relative]))
+        if len(input_paths) > MAX_RECEIPT_FILES:
+            raise ValidationError(f"receipt input inventory exceeds {MAX_RECEIPT_FILES} files")
+
+        receipt_inputs: list[dict[str, str]] = []
+        input_hashes: dict[str, str] = {}
+        for relative in sorted(input_paths):
+            read_snapshot(relative, "receipt input", collect=False)
+            sha256 = snapshots[relative].sha256
+            assert sha256 is not None
+            input_hashes[relative] = sha256
+            receipt_inputs.append({"path": relative, "sha256": sha256})
+
+        status_items = {item["name"]: item for item in status["visualizations"]}
+        for item in manifest["visualizations"]:
+            read_snapshot(item["source"], "receipt visualization source", collect=False)
+            if snapshots[item["source"]].sha256 != status_items[item["name"]].get("source_sha256"):
+                raise RenderError(f"receipt source changed after validation: {item['source']}")
+        for item in status["visualizations"]:
+            for dependency in item.get("dependencies", []):
+                path = dependency["path"]
+                if path in input_hashes and dependency["sha256"] != input_hashes[path]:
+                    raise RenderError(f"receipt input changed after validation: {path}")
+
+        if len(manifest["visualizations"]) > MAX_RECEIPT_FILES:
+            raise ValidationError(f"receipt artifact inventory exceeds {MAX_RECEIPT_FILES} files")
+        artifacts: list[dict[str, str]] = []
+        for item in sorted(manifest["visualizations"], key=lambda value: value["output"]):
+            relative = item["output"]
+            read_snapshot(relative, "receipt artifact", collect=False)
+            sha256 = snapshots[relative].sha256
+            assert sha256 is not None
+            checked_hash = status_items[item["name"]].get("output_sha256")
+            if checked_hash != sha256:
+                raise RenderError(f"receipt artifact changed after freshness validation: {relative}")
+            artifacts.append({"path": relative, "sha256": sha256})
+
+        return (
+            {
+                "schema_version": 1,
+                "provider": "vegavisuals",
+                "provider_version": __version__,
+                "release": DEFAULT_RELEASE,
+                "request_sha256": digest.hexdigest(),
+                "ok": True,
+                "inputs": receipt_inputs,
+                "artifacts": artifacts,
+            },
+            snapshots,
+        )
+
+    def _verify_receipt_snapshots(self, snapshots: dict[str, _FileSnapshot]) -> None:
+        for relative, expected in snapshots.items():
+            current = self._project_file_snapshot(
+                relative,
+                max_bytes=expected.size,
+                description="receipt file",
+            )
+            if current != expected:
+                raise RenderError(f"receipt file changed during publication: {relative}")
 
     def visualization_status(self, manifest_path: str = MANIFEST_NAME) -> dict[str, Any]:
         manifest = self._load_manifest(manifest_path)
@@ -3339,6 +3656,7 @@ class Registry:
                     "ok": True,
                     "state": state,
                     "fingerprint": fingerprint,
+                    "source_sha256": validation["source_sha256"],
                     "output_exists": output_snapshot.exists,
                     "output_sha256": output_snapshot.sha256,
                     "managed": entry is not None,
@@ -3355,8 +3673,10 @@ class Registry:
             "ok": counts.get("invalid", 0) == 0,
             "project": str(self.project_root),
             "manifest": manifest["path"],
+            "manifest_sha256": manifest["sha256"],
             "profile": manifest["profile"],
             "family": manifest["family"],
+            "inputs": manifest["inputs"],
             "renderer": self._public_renderer(renderer),
             "lock": {
                 "path": LOCK_NAME,
@@ -3374,14 +3694,45 @@ class Registry:
         }
 
     def visualization_check(self, manifest_path: str = MANIFEST_NAME) -> dict[str, Any]:
-        status = self.visualization_status(manifest_path)
-        issues = [
-            f"{item['name']}: {item['state']}"
-            for item in status["visualizations"]
-            if item["state"] != "fresh"
-        ]
-        issues.extend(f"orphaned lock entry: {name}" for name in status["orphaned_lock_entries"])
-        return {**status, "ok": not issues, "issues": issues}
+        with self._project_lock():
+            self._invalidate_receipt()
+            status = self.visualization_status(manifest_path)
+            issues = [
+                f"{item['name']}: {item['state']}"
+                for item in status["visualizations"]
+                if item["state"] != "fresh"
+            ]
+            issues.extend(f"orphaned lock entry: {name}" for name in status["orphaned_lock_entries"])
+            if issues:
+                return {**status, "ok": False, "issues": issues}
+            manifest = self._load_manifest(manifest_path)
+            receipt, snapshots = self._receipt_payload(manifest, status)
+            data = json.dumps(
+                receipt,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8") + b"\n"
+            self._verify_receipt_snapshots(snapshots)
+            try:
+                self._publish_owned_project_bytes(RECEIPT_PATH, data, max_bytes=MAX_RECEIPT_BYTES)
+                self._verify_receipt_snapshots(snapshots)
+            except BaseException:
+                self._invalidate_receipt()
+                raise
+            return {
+                **status,
+                "ok": True,
+                "issues": [],
+                "receipt": {
+                    "path": RECEIPT_PATH,
+                    "schema_version": 1,
+                    "request_sha256": receipt["request_sha256"],
+                    "inputs": len(receipt["inputs"]),
+                    "artifacts": len(receipt["artifacts"]),
+                },
+            }
 
     def render_visualizations(
         self,
@@ -3592,14 +3943,27 @@ class Registry:
         }
 
     def lifecycle_check(self, command: str = "") -> dict[str, Any]:
-        install = self.install_check(command)
-        factory = self.factory_check()
+        factory_lifecycle = self.factory_lifecycle_check(command)
         project = self.visualization_check()
         return {
-            "ok": install["ok"] and factory["ok"] and project["ok"],
+            "ok": factory_lifecycle["ok"] and project["ok"],
+            "install": factory_lifecycle["install"],
+            "factory": factory_lifecycle["factory"],
+            "project": project,
+        }
+
+    def factory_lifecycle_check(
+        self,
+        command: str = "",
+        profile: str = DEFAULT_PROFILE,
+        family: str = DEFAULT_FAMILY,
+    ) -> dict[str, Any]:
+        install = self.install_check(command)
+        factory = self.factory_check(profile=profile, family=family)
+        return {
+            "ok": install["ok"] and factory["ok"],
             "install": install,
             "factory": factory,
-            "project": project,
         }
 
     def self_test(self) -> dict[str, Any]:
@@ -3643,10 +4007,22 @@ class Registry:
             "validations": validations,
         }
 
-    def down(self) -> dict[str, Any]:
+    def _down(self, *, all_workspaces: bool) -> dict[str, Any]:
+        project_id = workspace_id(self.project_root)
         docker = shutil.which("docker")
         if not docker:
-            return {"ok": True, "containers": [], "message": "Docker is unavailable"}
+            return {
+                "ok": True,
+                "containers": [],
+                "workspace": None if all_workspaces else project_id,
+                "all_workspaces": all_workspaces,
+                "message": "Docker is unavailable",
+            }
+        filters = ["--filter", f"label={CONTAINER_LABEL}"]
+        if not all_workspaces:
+            filters.extend(
+                ["--filter", f"label={CONTAINER_WORKSPACE_LABEL}={project_id}"]
+            )
         listed = _run_command(
             [
                 docker,
@@ -3654,23 +4030,35 @@ class Registry:
                 "ls",
                 "--all",
                 "--quiet",
-                "--filter",
-                f"label={CONTAINER_LABEL}",
+                *filters,
             ],
             cwd=self.project_root,
             timeout=30,
         )
         if listed["returncode"] != 0:
-            return {"ok": False, "containers": [], "result": listed}
+            return {
+                "ok": False,
+                "containers": [],
+                "workspace": None if all_workspaces else project_id,
+                "all_workspaces": all_workspaces,
+                "result": listed,
+            }
         containers = listed["stdout"].split()
         if any(not re.fullmatch(r"[0-9a-f]{12,64}", container) for container in containers):
             return {
                 "ok": False,
                 "containers": [],
+                "workspace": None if all_workspaces else project_id,
+                "all_workspaces": all_workspaces,
                 "message": "Docker returned an invalid container identifier; refusing cleanup.",
             }
         if not containers:
-            return {"ok": True, "containers": []}
+            return {
+                "ok": True,
+                "containers": [],
+                "workspace": None if all_workspaces else project_id,
+                "all_workspaces": all_workspaces,
+            }
         removed = _run_command(
             [docker, "container", "rm", "--force", *containers],
             cwd=self.project_root,
@@ -3679,8 +4067,16 @@ class Registry:
         return {
             "ok": removed["returncode"] == 0,
             "containers": containers,
+            "workspace": None if all_workspaces else project_id,
+            "all_workspaces": all_workspaces,
             "result": removed,
         }
+
+    def down(self) -> dict[str, Any]:
+        return self._down(all_workspaces=False)
+
+    def down_all(self) -> dict[str, Any]:
+        return self._down(all_workspaces=True)
 
     def install_codex_mcp(
         self,
@@ -3818,51 +4214,53 @@ class Registry:
             factory_launcher = [
                 "bash",
                 "${factoryRoot}/scripts/factory-launcher",
-                "${workspaceFolder}",
             ]
-            transport = [*factory_launcher, "serve"]
+            project = "${workspaceFolder}"
+            transport = [*factory_launcher, "serve", project]
             commands = {
                 "build": [*factory_launcher, "build"],
-                "init": [*factory_launcher, "init"],
+                "init": [*factory_launcher, "init", project],
                 "check": [*factory_launcher, "check"],
                 "tests": [*factory_launcher, "tests"],
                 "smoke": [*factory_launcher, "smoke"],
-                "down": [*factory_launcher, "down"],
+                "down": [*factory_launcher, "down", project],
+                "down_all": [*factory_launcher, "down-all"],
                 "update": [*factory_launcher, "update"],
                 "release_status": [*factory_launcher, "release-status"],
                 "install_check": [*factory_launcher, "install-check"],
-                "install_codex_mcp": [*factory_launcher, "install-codex-mcp"],
+                "install_codex_mcp": [*factory_launcher, "install-codex-mcp", project],
                 "factory_check": [*factory_launcher, "factory-check"],
                 "serve": transport,
                 "client_config": [*factory_launcher, "client-config"],
                 "manifest": [*factory_launcher, "manifest"],
-                "render": [*factory_launcher, "render"],
-                "render_all": [*factory_launcher, "render-all"],
+                "render": [*factory_launcher, "render", project],
+                "render_all": [*factory_launcher, "render-all", project],
             }
         else:
             package_cli = [sys.executable, "-m", "vegavisuals.cli"]
             project_cli = [*package_cli, "--project", "${workspaceFolder}"]
             transport = [*project_cli, "mcp", "serve"]
             commands = {
-                "build": [*project_cli, "ensure-renderer"],
+                "build": [*package_cli, "ensure-renderer"],
                 "init": [*project_cli, "init"],
-                "check": [*project_cli, "lifecycle-check"],
-                "tests": [*project_cli, "self-test"],
-                "smoke": [*project_cli, "mcp-smoke"],
+                "check": [*package_cli, "factory-lifecycle-check"],
+                "tests": [*package_cli, "self-test"],
+                "smoke": [*package_cli, "mcp-smoke"],
                 "down": [*project_cli, "down"],
+                "down_all": [*package_cli, "down-all"],
                 "update": [*package_cli, "update"],
-                "release_status": [*project_cli, "release-status"],
-                "install_check": [*project_cli, "install-check"],
+                "release_status": [*package_cli, "release-status"],
+                "install_check": [*package_cli, "install-check"],
                 "install_codex_mcp": [
                     *project_cli,
                     "install-codex-mcp",
                     "--workspace",
                     "${workspaceFolder}",
                 ],
-                "factory_check": [*project_cli, "factory-check"],
+                "factory_check": [*package_cli, "factory-check"],
                 "serve": transport,
-                "client_config": [*project_cli, "mcp", "client-config"],
-                "manifest": [*project_cli, "factory-manifest"],
+                "client_config": [*package_cli, "mcp", "client-config"],
+                "manifest": [*package_cli, "factory-manifest"],
                 "render": [*project_cli, "render"],
                 "render_all": [*project_cli, "render-all"],
             }
@@ -3880,7 +4278,7 @@ class Registry:
             "workspace_rule": {
                 "consumer_root": ".",
                 "source_paths": [MANIFEST_NAME],
-                "generated_paths": [".cache/vegavisuals", LOCK_NAME],
+                "generated_paths": [".cache/vegavisuals", LOCK_NAME, RECEIPT_PATH],
                 "init_creates": [".cache/vegavisuals", MANIFEST_NAME],
                 "allowed_external_writes": [],
             },
@@ -3922,6 +4320,7 @@ class Registry:
                 "manifest": 1,
                 "lock": LOCK_VERSION,
                 "inline_cache": CACHE_VERSION,
+                "receipt": 1,
                 "mcp_errors": "typed-application-result",
             },
         }

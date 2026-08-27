@@ -13,6 +13,7 @@ workspace_rule:
   generated_paths:
     - .cache/vegavisuals
     - .vegavisuals.lock.json
+    - .unaltraweb/receipts/vegavisuals.json
   init_creates:
     - .cache/vegavisuals
     - .vegavisuals.yml
@@ -28,89 +29,83 @@ transport:
   command:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - serve
+    - ${workspaceFolder}
 commands:
   build:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - build
   init:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - init
+    - ${workspaceFolder}
   check:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - check
   tests:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - tests
   smoke:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - smoke
   down:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - down
+    - ${workspaceFolder}
+  down_all:
+    - bash
+    - ${factoryRoot}/scripts/factory-launcher
+    - down-all
   update:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - update
   release_status:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - release-status
   install_check:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - install-check
   install_codex_mcp:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - install-codex-mcp
+    - ${workspaceFolder}
   factory_check:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - factory-check
   serve:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - serve
+    - ${workspaceFolder}
   client_config:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - client-config
   manifest:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - manifest
   render:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - render
+    - ${workspaceFolder}
   render_all:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
-    - ${workspaceFolder}
     - render-all
+    - ${workspaceFolder}
 mcp:
   server_name: vegavisuals
   transport: stdio
@@ -154,4 +149,5 @@ contracts:
   manifest: 1
   lock: 2
   inline_cache: 2
+  receipt: 1
   mcp_errors: typed-application-result

@@ -34,7 +34,7 @@ class MCPStdioSmokeTest(unittest.TestCase):
                 if executable and factory_root:
                     environment.pop("PYTHONPATH", None)
                     command = executable
-                    args = [str(pathlib.Path(factory_root) / "scripts/factory-launcher"), str(project), "serve"]
+                    args = [str(pathlib.Path(factory_root) / "scripts/factory-launcher"), "serve", str(project)]
                 elif executable and arguments_json:
                     environment.pop("PYTHONPATH", None)
                     command = executable
