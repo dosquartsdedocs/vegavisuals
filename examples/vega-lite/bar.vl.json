@@ -5,7 +5,7 @@
     "subtitle": "A Vega-Lite example backed by project-local CSV"
   },
   "data": {
-    "url": "data/quarters.csv"
+    "url": "examples/vega-lite/data/quarters.csv"
   },
   "width": 480,
   "height": 280,

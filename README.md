@@ -44,14 +44,16 @@ private MCP environment under the factory, pins `mcp==1.29.0`, and never writes
 tooling into the consumer:
 
 ```bash
-make mcp-build PROJECT=/path/to/consumer
+make mcp-build
 make mcp-init PROJECT=/path/to/consumer
-make mcp-check PROJECT=/path/to/consumer
+make mcp-check
 make mcp-stdio PROJECT=/path/to/consumer
 ```
 
 `mcp-init` creates an empty `.vegavisuals.yml` and the generated cache tree. It
 preserves an existing manifest unless `vegavisuals init --force` is requested.
+Build, factory check, and smoke preparation do not require a consumer project;
+initialization, serving, rendering, and project cleanup always require one.
 
 The two repository examples cover a Vega-Lite bar chart with project-local CSV
 and a raw Vega chart:
@@ -75,6 +77,7 @@ Every render uses a fixed worker entrypoint in the image. The host registry:
 - Never mounts the consumer project into the renderer.
 - Mounts only a prepared spec and staged output in an isolated host temporary directory at `/output:rw`.
 - Runs Docker with `--network none`, `--read-only`, all capabilities dropped, `no-new-privileges`, a non-root UID/GID, CPU/memory/PID/file limits, and a bounded tmpfs. Root callers use `65534:65534`.
+- Labels every renderer container with the factory and a stable hash of the canonical consumer root so cleanup can stay project-scoped.
 - Validates PNG chunks and CRCs, normalized PDF structure, recursive SVG safety, and output size.
 - Copies the validated artifact to a temporary sibling and atomically replaces the destination from the host.
 
@@ -94,11 +97,11 @@ then a recognized `$schema`, and finally Vega-Lite `mark` or raw Vega `marks`
 structure. Explicit `--engine vega-lite` or `--engine vega` also works for JSON
 sources; a recognized suffix may not contradict the explicit engine.
 
-File sources may use a static project-relative `data.url`. It is resolved from
-the source directory, must resolve to a UTF-8 regular file inside the project,
-and is staged as raw inline `values` with its declared or inferred CSV, TSV, or
-JSON format. This avoids `file:` loader ambiguity while preserving Vega's own
-format parser. Symlink and `..` escapes are rejected. HTTP, HTTPS,
+File sources may use a static project-root-relative `data.url`. It must resolve
+to a UTF-8 regular file inside the project and is staged as raw inline `values`
+with its declared or inferred CSV, TSV, or JSON format. This avoids `file:`
+loader ambiguity while preserving Vega's own format parser. Symlink and `..`
+escapes are rejected. HTTP, HTTPS,
 protocol-relative, `file:`, `data:`, and dynamic data URLs are rejected. Image
 and hyperlink URL channels are also rejected so published SVG remains offline.
 
@@ -115,6 +118,8 @@ engine, format, profile, and theme.
 version: 1
 profile: vl-convert-1.9.0
 family: benizar
+inputs:
+  - charts/data/shared.csv
 visualizations:
   - name: quarterly-bars
     source: charts/quarterly.vl.json
@@ -128,8 +133,15 @@ visualizations:
     output: public/overview.pdf
 ```
 
-`engine`, `format`, and `inputs` are optional. Inputs supplement data files
-discovered from the spec and participate in the fingerprint.
+`engine`, `format`, and both top-level and per-visualization `inputs` are
+optional. Inputs supplement data files discovered from the spec and participate
+in the fingerprint.
+
+On success, `check` and `visualization_check` atomically publish the bounded
+unaltraweb companion receipt at `.unaltraweb/receipts/vegavisuals.json`. It
+records the current package/release contract, the length-prefixed request hash,
+all explicit and local `data.url` input hashes, and the exact manifest artifact
+hashes. A failed check invalidates any prior owned receipt.
 
 `.vegavisuals.lock.json` uses lock version 2. Each entry strictly records the
 source, output, engine, selected Vega-Lite version, format, profile, family,
@@ -172,6 +184,7 @@ vegavisuals [--project ROOT] compatibility-status [--profile PROFILE]
 vegavisuals [--project ROOT] factory-check [--profile PROFILE] [--family FAMILY]
 vegavisuals [--project ROOT] init [--force]
 vegavisuals [--project ROOT] install-check [--command EXECUTABLE]
+vegavisuals [--project ROOT] factory-lifecycle-check [--command EXECUTABLE]
 vegavisuals [--project ROOT] lifecycle-check [--command EXECUTABLE]
 vegavisuals [--project ROOT] install-codex-mcp [--dry-run]
 vegavisuals [--project ROOT] release-status [--release TAG]
@@ -185,6 +198,8 @@ vegavisuals [--project ROOT] render-all [--manifest .vegavisuals.yml]
 vegavisuals [--project ROOT] factory-manifest
 vegavisuals [--project ROOT] build-renderer [--profile PROFILE]
 vegavisuals [--project ROOT] ensure-renderer [--profile PROFILE]
+vegavisuals --project ROOT down
+vegavisuals down-all
 vegavisuals [--project ROOT] mcp serve
 vegavisuals [--project ROOT] mcp client-config
 vegavisuals [--project ROOT] mcp list-tools
@@ -299,9 +314,12 @@ upgrade.
 
 `mcp-factory.yml` is the checkout discovery contract. Wheels and sdists carry a
 separate package-native manifest that invokes the installed CLI directly and
-provides `tests`, `smoke`, and `down` without Make or checkout paths. Dynamic
+provides `tests`, `smoke`, `down`, and `down-all` without Make or checkout paths. Dynamic
 metadata from `vegavisuals factory-manifest` uses the active Python interpreter
-while preserving the same lifecycle contract.
+while preserving the same lifecycle contract. ContExt checkout commands omit
+`${workspaceFolder}` for factory-only operations and pass it only to project
+operations. `down` removes containers carrying both the factory and selected
+workspace labels; `down-all` is an explicit emergency cleanup across workspaces.
 
 ## Verification
 
@@ -310,7 +328,7 @@ python3 -m pip install -e '.[mcp,dev]'
 make check
 make tests
 make tests-install
-make mcp-check PROJECT=/path/to/initialized/consumer
+make mcp-check
 make docker-smoke
 make mcp-smoke
 ```
