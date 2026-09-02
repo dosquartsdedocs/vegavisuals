@@ -8,11 +8,15 @@ FORMAT ?=
 INPUT ?=
 OUTPUT ?=
 REQUIRE_DOCKER ?= 0
-override MCP_VENV := .cache/vegavisuals/mcp-venv
+MCP_VERSION := 1.29.0
+MCP_ENV_KEY := $(shell "$(PYTHON)" -c 'import hashlib,pathlib,platform,sys; root=pathlib.Path.cwd().resolve(); names=("pyproject.toml","src/vegavisuals/_version.py","hatch_build.py","scripts/mcp-env-bootstrap"); data=b"\0".join(name.encode()+b"\0"+(root/name).read_bytes() for name in names)+b"\0"+str((root,"$(MCP_VERSION)",sys.implementation.cache_tag,sys.version_info[:3],platform.machine(),pathlib.Path(sys.executable).resolve())).encode(); print(hashlib.sha256(data).hexdigest()[:24])')
+ifeq ($(strip $(MCP_ENV_KEY)),)
+$(error Could not derive the MCP environment key)
+endif
+override MCP_VENV := .cache/vegavisuals/mcp-venvs/$(MCP_ENV_KEY)
 MCP_PYTHON := $(MCP_VENV)/bin/python
 MCP_CLI := $(MCP_VENV)/bin/vegavisuals
-MCP_STAMP := $(MCP_VENV)/.installed
-MCP_VERSION := 1.29.0
+MCP_ENV_LOCK := .cache/vegavisuals/mcp-env.lock
 override PROJECT := $(value PROJECT)
 override PROFILE := $(value PROFILE)
 override FAMILY := $(value FAMILY)
@@ -22,7 +26,7 @@ override INPUT := $(value INPUT)
 override OUTPUT := $(value OUTPUT)
 export PROJECT PROFILE FAMILY ENGINE FORMAT INPUT OUTPUT
 
-.PHONY: help build check test tests tests-install renderer-build docker-smoke mcp-env mcp-build mcp-init mcp-check mcp-stdio mcp-smoke mcp-down mcp-down-all render-image clean
+.PHONY: help build check test tests tests-install renderer-build docker-smoke mcp-env mcp-cli-path mcp-build mcp-init mcp-check mcp-stdio mcp-smoke mcp-down mcp-down-all render-image clean
 
 help:
 	@printf '%s\n' \
@@ -35,7 +39,7 @@ help:
 	  'make mcp-build      Bootstrap the MCP environment and renderer' \
 	  'make mcp-init       Initialize PROJECT without overwriting existing files' \
 	  'make mcp-check      Validate the MCP install and factory' \
-	  'make mcp-stdio      Serve MCP over stdio for PROJECT' \
+	  'make mcp-stdio      Serve MCP for MCP_CONSUMER_WORKSPACE (or PROJECT)' \
 	  'make mcp-smoke      Exercise MCP stdio and both real Docker engines' \
 	  'make mcp-down       Remove renderer containers for PROJECT only' \
 	  'make mcp-down-all   Remove all vegavisuals renderer containers' \
@@ -68,7 +72,7 @@ tests-install: build
 	@wheels=(dist/vegavisuals-*.whl); case "$${wheels[0]}" in *-linux_*.whl) ;; *) printf 'Wheel is not Linux-tagged: %s\n' "$${wheels[0]}" >&2; exit 1 ;; esac
 	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile; wheel=os.environ["WHEEL_PATH"]; archive=zipfile.ZipFile(wheel); metadata=archive.read(next(name for name in archive.namelist() if name.endswith(".dist-info/WHEEL"))).decode(); assert "Root-Is-Purelib: false" in metadata; assert "Tag: py3-none-linux_" in metadata'
 	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile; archive=zipfile.ZipFile(os.environ["WHEEL_PATH"]); names=archive.namelist(); metadata=archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode(); assert "License-Expression: GPL-3.0-only" in metadata; assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names); assert any(name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md") for name in names)'
-	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile,yaml; archive=zipfile.ZipFile(os.environ["WHEEL_PATH"]); manifest=yaml.safe_load(archive.read("vegavisuals/factory/mcp-factory.yml")); assert manifest["version"] == "0.3.1"; assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False; assert manifest["contracts"]["receipt"] == 1; assert ".unaltraweb/receipts/vegavisuals.json" in manifest["workspace_rule"]["generated_paths"]; assert {"tests", "smoke", "down", "down_all"} <= manifest["commands"].keys(); assert "$${workspaceFolder}" not in manifest["commands"]["build"]; assert "$${workspaceFolder}" not in manifest["commands"]["check"]; assert "factoryRoot" not in str(manifest); assert all("make" not in command for command in [manifest["transport"]["command"], *manifest["commands"].values()])'
+	@wheels=(dist/vegavisuals-*.whl); WHEEL_PATH="$${wheels[0]}" $(PYTHON) -c 'import os,zipfile,yaml; archive=zipfile.ZipFile(os.environ["WHEEL_PATH"]); manifest=yaml.safe_load(archive.read("vegavisuals/factory/mcp-factory.yml")); assert manifest["version"] == "0.3.1"; assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False; assert manifest["contracts"]["receipt"] == 1; assert manifest["workspace_rule"]["binding"] == "consumer"; assert ".unaltraweb/receipts/vegavisuals.json" in manifest["workspace_rule"]["generated_paths"]; assert {"tests", "smoke", "down"} <= manifest["commands"].keys(); assert "down_all" not in manifest["commands"]; assert "$${workspaceFolder}" not in manifest["commands"]["build"]; assert "$${workspaceFolder}" not in manifest["commands"]["check"]; assert "factoryRoot" not in str(manifest); assert all("make" not in command for command in [manifest["transport"]["command"], *manifest["commands"].values()])'
 	@sdists=(dist/vegavisuals-*.tar.gz); SDIST_PATH="$${sdists[0]}" $(PYTHON) -c 'import os,tarfile; names=tarfile.open(os.environ["SDIST_PATH"]).getnames(); assert any(name.endswith("/LICENSE") for name in names); assert any(name.endswith("/THIRD_PARTY_NOTICES.md") for name in names)'
 	@rm -rf .tmp/windows-wheel-check
 	@if $(PYTHON) -m pip download --disable-pip-version-check --no-deps --no-index --find-links dist --only-binary=:all: --dest .tmp/windows-wheel-check --platform win_amd64 --implementation cp --python-version 312 --abi cp312 vegavisuals >/dev/null 2>&1; then printf 'Linux-only wheel was selected for Windows.\n' >&2; exit 1; fi
@@ -81,7 +85,7 @@ tests-install: build
 	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli install-check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals factory-lifecycle-check --command "$${PWD}/.tmp/install-venv/bin/vegavisuals" >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/python -m vegavisuals.cli --project . lifecycle-check >/dev/null
-	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import sys; from vegavisuals import Registry; manifest=Registry(".").factory_manifest(); command=manifest["transport"]["command"]; assert command[:3] == [sys.executable, "-m", "vegavisuals.cli"]; assert "make" not in command; assert {"tests", "smoke", "down", "down_all"} <= manifest["commands"].keys(); assert "$${workspaceFolder}" not in manifest["commands"]["manifest"]; assert "$${workspaceFolder}" not in manifest["commands"]["client_config"]; assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False'
+	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import sys; from vegavisuals import Registry; manifest=Registry(".").factory_manifest(); command=manifest["transport"]["command"]; assert command[:3] == [sys.executable, "-m", "vegavisuals.cli"]; assert "make" not in command; assert {"tests", "smoke", "down"} <= manifest["commands"].keys(); assert "down_all" not in manifest["commands"]; assert "$${workspaceFolder}" not in manifest["commands"]["manifest"]; assert "$${workspaceFolder}" not in manifest["commands"]["client_config"]; assert manifest["discovery"]["checkout_required_for_make_lifecycle"] is False'
 	@env -u PYTHONPATH .tmp/install-venv/bin/python -c 'import json,pathlib,shutil,tempfile; from vegavisuals import Registry; root=pathlib.Path(tempfile.mkdtemp(prefix="vegavisuals-installed-receipt-")); registry=Registry(root); registry.initialize_project(); result=registry.visualization_check(); receipt=json.loads((root / ".unaltraweb/receipts/vegavisuals.json").read_text()); assert result["ok"] and receipt["ok"] and receipt["provider"] == "vegavisuals" and receipt["inputs"] == [] and receipt["artifacts"] == []; registry.close(); shutil.rmtree(root)'
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals factory-check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals self-test >/dev/null
@@ -103,13 +107,11 @@ docker-smoke:
 	  printf '%s\n' 'Docker is unavailable; real renderer smoke skipped.'; \
 	fi
 
-mcp-env: $(MCP_STAMP)
+mcp-env:
+	@bash scripts/mcp-env-bootstrap "$${PWD}/$(MCP_VENV)" "$${PWD}/$(MCP_ENV_LOCK)" "$(PYTHON)" "$(MCP_VERSION)"
 
-$(MCP_STAMP): pyproject.toml
-	@mkdir -p "$(dir $(MCP_VENV))"
-	@$(PYTHON) -m venv "$(MCP_VENV)"
-	@"$(MCP_PYTHON)" -m pip install --disable-pip-version-check --editable '.[mcp]' "mcp==$(MCP_VERSION)" >/dev/null
-	@touch "$@"
+mcp-cli-path: mcp-env
+	@printf '%s/%s\n' "$${PWD}" "$(MCP_CLI)"
 
 mcp-build: mcp-env
 	@"$(MCP_CLI)" install-check --command "$${PWD}/$(MCP_CLI)" >/dev/null
@@ -122,11 +124,11 @@ mcp-check: mcp-env
 	@"$(MCP_CLI)" factory-lifecycle-check --command "$${PWD}/$(MCP_CLI)" --profile "$${PROFILE}" --family "$${FAMILY}" >/dev/null
 
 mcp-stdio: mcp-build
-	@"$(MCP_CLI)" --project "$${PROJECT}" mcp serve
+	@exec bash scripts/mcp-stdio-launcher "$${PWD}/$(MCP_CLI)"
 
 mcp-smoke: mcp-build
 	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND="$${PWD}/$(MCP_CLI)" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
-	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_COMMAND=bash VEGAVISUALS_MCP_FACTORY_ROOT="$${PWD}" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
+	@VEGAVISUALS_MCP_SMOKE=1 VEGAVISUALS_MCP_FACTORY_ROOT="$${PWD}" "$(MCP_PYTHON)" -m unittest tests.test_mcp_stdio
 	@if docker info >/dev/null 2>&1; then \
 	  VEGAVISUALS_DOCKER_SMOKE=1 "$(MCP_PYTHON)" -m unittest tests.test_docker_smoke; \
 	elif [[ "$(REQUIRE_DOCKER)" == "1" ]]; then \
