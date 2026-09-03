@@ -2,6 +2,7 @@ schema_version: 1
 name: vegavisuals
 version: 0.3.1
 kind: codex-mcp-factory
+install_scope: user
 description: Hardened Docker rendering for themed Vega-Lite and Vega visualizations.
 license: GPL-3.0-only
 repository: https://github.com/dosquartsdedocs/vegavisuals
