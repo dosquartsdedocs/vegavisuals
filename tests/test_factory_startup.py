@@ -17,6 +17,14 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from vegavisuals import Registry
 
 
+def independent_make_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES"}
+    }
+
+
 class FactoryStartupTest(unittest.TestCase):
     def test_mcp_environment_key_tracks_version_and_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -43,6 +51,7 @@ class FactoryStartupTest(unittest.TestCase):
                 completed = subprocess.run(
                     ["make", "--no-print-directory", "-np", "help"],
                     cwd=factory,
+                    env=independent_make_environment(),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -145,7 +154,7 @@ exit 2
             stdouts: list[str] = []
             for consumer, result in zip(consumers, results, strict=True):
                 environment = {
-                    **os.environ,
+                    **independent_make_environment(),
                     "PYTHON": str(fake_python),
                     "MCP_CONSUMER_WORKSPACE": str(consumer),
                     "STARTUP_RESULT": str(result),
@@ -179,7 +188,7 @@ exit 2
 
             make_result = root / "make-result"
             make_environment = {
-                **os.environ,
+                **independent_make_environment(),
                 "PYTHON": str(fake_python),
                 "MCP_CONSUMER_WORKSPACE": str(consumers[0]),
                 "STARTUP_RESULT": str(make_result),
@@ -200,7 +209,7 @@ exit 2
             self.assertEqual((root / "bootstrap-count").read_text(encoding="utf-8"), "build\n")
 
             failed_environment = {
-                **os.environ,
+                **independent_make_environment(),
                 "PYTHON": str(fake_python),
                 "FAKE_ENV_KEY": "retry-key",
                 "FAIL_INSTALL": "1",
