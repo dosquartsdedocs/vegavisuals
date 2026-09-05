@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FACTORY_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+VENV="$(realpath -m -- "${1:?MCP virtual environment path is required}")"
+LOCK_FILE="$(realpath -m -- "${2:?MCP environment lock path is required}")"
+PYTHON="${3:?Python executable is required}"
+MCP_VERSION="${4:?MCP version is required}"
+
+case "${VENV}" in
+  "${FACTORY_ROOT}"/.cache/vegavisuals/mcp-venvs/*) ;;
+  *)
+    printf 'Refusing unsafe MCP environment path: %s\n' "${VENV}" >&2
+    exit 2
+    ;;
+esac
+case "${LOCK_FILE}" in
+  "${FACTORY_ROOT}"/.cache/vegavisuals/*) ;;
+  *)
+    printf 'Refusing unsafe MCP lock path: %s\n' "${LOCK_FILE}" >&2
+    exit 2
+    ;;
+esac
+
+STAMP="${VENV}/.installed"
+CLI="${VENV}/bin/vegavisuals"
+mkdir -p -- "$(dirname -- "${VENV}")" "$(dirname -- "${LOCK_FILE}")"
+exec 9>"${LOCK_FILE}"
+flock 9
+
+if [[ -f "${STAMP}" && -x "${CLI}" ]]; then
+  exit 0
+fi
+if [[ -f "${STAMP}" ]]; then
+  printf 'Stamped MCP environment is damaged; refusing in-place replacement: %s\n' "${VENV}" >&2
+  exit 1
+fi
+
+rm -rf -- "${VENV}"
+cleanup() {
+  rm -rf -- "${VENV}"
+}
+trap cleanup EXIT HUP INT TERM
+
+"${PYTHON}" -m venv "${VENV}"
+"${VENV}/bin/python" -m pip install --disable-pip-version-check \
+  --editable "${FACTORY_ROOT}[mcp]" "mcp==${MCP_VERSION}" >/dev/null
+[[ -x "${CLI}" ]] || {
+  printf 'MCP environment did not install the vegavisuals CLI\n' >&2
+  exit 1
+}
+
+stamp_tmp="${STAMP}.tmp.$$"
+: >"${stamp_tmp}"
+mv -f -- "${stamp_tmp}" "${STAMP}"
+trap - EXIT HUP INT TERM

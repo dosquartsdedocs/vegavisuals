@@ -2,11 +2,13 @@ schema_version: 1
 name: vegavisuals
 version: 0.3.1
 kind: codex-mcp-factory
+install_scope: user
 description: Hardened Docker rendering for themed Vega-Lite and Vega visualizations.
 license: GPL-3.0-only
 repository: https://github.com/dosquartsdedocs/vegavisuals
 factory_assets: ../assets
 workspace_rule:
+  binding: consumer
   consumer_root: .
   source_paths:
     - .vegavisuals.yml
@@ -26,7 +28,9 @@ runtime:
   mcp_version: 1.29.0
 transport:
   type: stdio
-  command: [vegavisuals, --project, "${workspaceFolder}", mcp, serve]
+  command: [vegavisuals, mcp, serve]
+  env:
+    MCP_CONSUMER_WORKSPACE: "${workspaceFolder}"
 commands:
   build: [vegavisuals, ensure-renderer]
   init: [vegavisuals, --project, "${workspaceFolder}", init]
@@ -34,7 +38,6 @@ commands:
   tests: [vegavisuals, self-test]
   smoke: [vegavisuals, mcp-smoke]
   down: [vegavisuals, --project, "${workspaceFolder}", down]
-  down_all: [vegavisuals, down-all]
   update: [vegavisuals, update]
   release_status: [vegavisuals, release-status]
   install_check: [vegavisuals, install-check]

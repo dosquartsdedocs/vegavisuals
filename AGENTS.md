@@ -34,7 +34,7 @@ environments, or renderer containers.
 - `make mcp-build` bootstraps the pinned private MCP environment and renderer image without a consumer project.
 - `make mcp-init PROJECT=/consumer/root` initializes the consumer idempotently.
 - `make mcp-check` validates the installation and factory without a consumer project.
-- `make mcp-stdio PROJECT=/consumer/root` fixes that root and serves stdio.
+- `MCP_CONSUMER_WORKSPACE=/consumer/root make --no-print-directory mcp-stdio` fixes that root and serves stdio.
 - `make mcp-smoke` checks protocol discovery and both render engines.
 - `make mcp-down PROJECT=/consumer/root` removes only that consumer's labelled renderer containers.
 - `make mcp-down-all` is the explicit emergency cleanup for renderer containers from every consumer.

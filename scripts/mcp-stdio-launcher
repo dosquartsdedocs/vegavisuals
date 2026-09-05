@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLI="${1:?vegavisuals CLI path is required}"
+CONSUMER="${MCP_CONSUMER_WORKSPACE:-${PROJECT:-}}"
+[[ -n "${CONSUMER}" ]] || {
+  printf 'MCP_CONSUMER_WORKSPACE or PROJECT is required\n' >&2
+  exit 2
+}
+if ! RESOLVED_CONSUMER="$(realpath -e -- "${CONSUMER}" 2>/dev/null)"; then
+  printf 'Consumer workspace cannot be resolved: %s\n' "${CONSUMER}" >&2
+  exit 2
+fi
+CONSUMER="${RESOLVED_CONSUMER}"
+[[ -d "${CONSUMER}" ]] || {
+  printf 'Consumer workspace is not a directory: %s\n' "${CONSUMER}" >&2
+  exit 2
+}
+
+exec "${CLI}" --project "${CONSUMER}" mcp serve

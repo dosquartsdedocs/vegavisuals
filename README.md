@@ -40,14 +40,16 @@ No prebuilt renderer image is published; each installation builds its local
 image from the licensed source package and pinned compatibility profile.
 
 The checkout also exposes a self-contained consumer lifecycle. It creates a
-private MCP environment under the factory, pins `mcp==1.29.0`, and never writes
-tooling into the consumer:
+content-addressed, checkout-bound MCP environment under the factory, pins
+`mcp==1.29.0`, and never writes tooling into the consumer. Concurrent cold
+starts serialize setup with a factory-local lock and publish the completion
+stamp only after the CLI is ready:
 
 ```bash
 make mcp-build
 make mcp-init PROJECT=/path/to/consumer
 make mcp-check
-make mcp-stdio PROJECT=/path/to/consumer
+MCP_CONSUMER_WORKSPACE=/path/to/consumer make --no-print-directory mcp-stdio
 ```
 
 `mcp-init` creates an empty `.vegavisuals.yml` and the generated cache tree. It
@@ -250,10 +252,12 @@ Inventory helpers are `profile_inventory()`, `factory_check()`, and
 ## MCP
 
 The consumer root is resolved once before the FastMCP server starts and is not
-an MCP tool argument:
+an MCP tool argument. Factory-generated stdio transports provide it through
+`MCP_CONSUMER_WORKSPACE`:
 
 ```bash
 vegavisuals --project /path/to/consumer mcp serve
+MCP_CONSUMER_WORKSPACE=/path/to/consumer vegavisuals mcp serve
 ```
 
 Tools:
@@ -299,13 +303,15 @@ vegavisuals mcp client-config --workspace-placeholder '${workspaceFolder}'
 
 The default configuration launches `-m vegavisuals.cli` with the exact Python
 interpreter running the installed CLI, so it does not depend on the client
-`PATH`. The default placeholder is a literal for clients that expand
-`${workspaceFolder}`. Replace it with an absolute consumer path when the client
-does not perform that expansion. Use `--command /absolute/path/to/vegavisuals`
-to select an explicit launcher, and `--format vscode-workspace` for VS Code's
-workspace shape. `vegavisuals install-codex-mcp --workspace /absolute/root`
-preserves an identical registration, adds a missing one, and refuses to replace
-a different registration; inspect the commands first with `--dry-run`.
+`PATH`. It places the literal `${workspaceFolder}` placeholder in the transport
+environment rather than in a shell or Make expression. Replace it with an
+absolute consumer path when the client does not perform that expansion. Use
+`--command /absolute/path/to/vegavisuals` to select an explicit launcher, and
+`--format vscode-workspace` for VS Code's workspace shape.
+`vegavisuals install-codex-mcp --workspace /absolute/root` preserves an
+identical command and environment registration, adds a missing one, and refuses
+to replace a different registration; inspect the commands first with
+`--dry-run`.
 
 The MCP `update` tool is deliberately non-mutating and returns the explicit
 update command. An operator can run `vegavisuals update` directly to
@@ -314,12 +320,14 @@ upgrade.
 
 `mcp-factory.yml` is the checkout discovery contract. Wheels and sdists carry a
 separate package-native manifest that invokes the installed CLI directly and
-provides `tests`, `smoke`, `down`, and `down-all` without Make or checkout paths. Dynamic
+provides `tests`, `smoke`, and project-scoped `down` without Make or checkout paths. Dynamic
 metadata from `vegavisuals factory-manifest` uses the active Python interpreter
 while preserving the same lifecycle contract. ContExt checkout commands omit
 `${workspaceFolder}` for factory-only operations and pass it only to project
 operations. `down` removes containers carrying both the factory and selected
-workspace labels; `down-all` is an explicit emergency cleanup across workspaces.
+workspace labels. The maintainer-only `down-all` CLI/Make operation remains an
+explicit emergency command and is deliberately excluded from discovery lifecycle
+commands so one IDE session cannot stop another.
 
 ## Verification
 

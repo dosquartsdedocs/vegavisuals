@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import csv
 import ctypes
 import errno
 import fcntl
 import hashlib
 import importlib.resources
+import io
 import json
 import math
 import os
@@ -324,6 +326,95 @@ def factory_metadata_root() -> pathlib.Path:
         return checkout
     packaged = pathlib.Path(__file__).resolve().parent / "factory"
     return packaged if packaged.is_dir() else asset_root()
+
+
+def _docker_config_root() -> pathlib.Path:
+    configured = os.environ.get("DOCKER_CONFIG", "").strip()
+    root = pathlib.Path(configured).expanduser() if configured else pathlib.Path.home() / ".docker"
+    return pathlib.Path(os.path.abspath(root))
+
+
+def _docker_endpoint_scope() -> dict[str, str]:
+    context = os.environ.get("DOCKER_CONTEXT", "").strip()
+    if context:
+        if context == "default":
+            return {"kind": "host", "value": "unix:///var/run/docker.sock"}
+        return {"kind": "context", "value": context, "config": str(_docker_config_root())}
+
+    host = os.environ.get("DOCKER_HOST", "").strip()
+    if host:
+        return {"kind": "host", "value": host}
+
+    config_root = _docker_config_root()
+    try:
+        with (config_root / "config.json").open("rb") as config_handle:
+            raw = config_handle.read(1024 * 1024 + 1)
+        config = json.loads(raw) if len(raw) <= 1024 * 1024 else {}
+        current = str(config.get("currentContext") or "").strip() if isinstance(config, dict) else ""
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        current = ""
+    if current and current != "default":
+        return {"kind": "context", "value": current, "config": str(config_root)}
+    return {"kind": "host", "value": "unix:///var/run/docker.sock"}
+
+
+def _renderer_lock_name(image: str) -> str:
+    scope = json.dumps(_docker_endpoint_scope(), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(scope.encode("utf-8") + b"\0" + image.encode("utf-8")).hexdigest()
+    return f"{digest}.lock"
+
+
+def _open_renderer_lock_directory() -> int:
+    uid = os.geteuid()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    candidates = (
+        (pathlib.Path(f"/run/user/{uid}"), ".unaltra-renderer-locks", True),
+        (pathlib.Path("/tmp"), f".unaltra-renderer-locks-{uid}", False),
+    )
+    failures: list[str] = []
+    for parent, name, private_parent in candidates:
+        parent_descriptor = -1
+        directory_descriptor = -1
+        try:
+            parent_descriptor = os.open(parent, directory_flags)
+            parent_status = os.fstat(parent_descriptor)
+            parent_mode = stat.S_IMODE(parent_status.st_mode)
+            if not stat.S_ISDIR(parent_status.st_mode):
+                raise OSError("lock parent is not a directory")
+            if private_parent:
+                if parent_status.st_uid != uid or parent_mode & 0o077:
+                    raise OSError("runtime lock parent is not private to the current user")
+            elif parent_status.st_uid not in {0, uid} or not parent_status.st_mode & stat.S_ISVTX:
+                raise OSError("temporary lock parent is not sticky and trusted")
+
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+            except FileExistsError:
+                pass
+            directory_descriptor = os.open(name, directory_flags, dir_fd=parent_descriptor)
+            directory_status = os.fstat(directory_descriptor)
+            directory_mode = stat.S_IMODE(directory_status.st_mode)
+            if (
+                not stat.S_ISDIR(directory_status.st_mode)
+                or directory_status.st_uid != uid
+                or directory_mode & 0o077
+            ):
+                raise OSError("renderer lock directory is not private to the current user")
+            return directory_descriptor
+        except OSError as exc:
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+            failures.append(f"{parent}: {exc}")
+        finally:
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+    raise RenderError(f"cannot open shared renderer lock directory: {'; '.join(failures)}")
+
+
+def _docker_mount_spec(*fields: str) -> str:
+    encoded = io.StringIO()
+    csv.writer(encoded, lineterminator="").writerow(fields)
+    return encoded.getvalue()
 
 
 def _entrypoint_python(command_path: str) -> str | None:
@@ -1426,6 +1517,7 @@ class Registry:
                     "name": dynamic["name"],
                     "version": dynamic["version"],
                     "kind": dynamic["kind"],
+                    "install_scope": dynamic["install_scope"],
                     "description": dynamic["description"],
                     "license": dynamic["license"],
                     "repository": dynamic["repository"],
@@ -2003,6 +2095,41 @@ class Registry:
             "renderer_contract": str(renderer["renderer_contract"]),
         }
 
+    @contextmanager
+    def _renderer_build_lock(self, image: str) -> Iterable[None]:
+        directory_descriptor = _open_renderer_lock_directory()
+        descriptor = -1
+        locked = False
+        try:
+            try:
+                descriptor = os.open(
+                    _renderer_lock_name(image),
+                    os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_descriptor,
+                )
+                lock_status = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(lock_status.st_mode)
+                    or lock_status.st_uid != os.geteuid()
+                    or stat.S_IMODE(lock_status.st_mode) & 0o077
+                    or lock_status.st_nlink != 1
+                ):
+                    raise RenderError("renderer build lock is not a private regular file")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise RenderError(f"cannot open renderer build lock: {exc}") from exc
+            locked = True
+            yield
+        finally:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(directory_descriptor)
+
     def _inspect_renderer(
         self,
         profile_name: str,
@@ -2040,8 +2167,14 @@ class Registry:
             "inspect": inspect,
         }
 
-    def build_renderer(self, profile: str = DEFAULT_PROFILE, *, dry_run: bool = False) -> dict[str, Any]:
-        profile_name, profile_data, profile_path = self._load_profile(profile)
+    def _build_renderer(
+        self,
+        profile_name: str,
+        profile_data: dict[str, Any],
+        profile_path: pathlib.Path,
+        *,
+        dry_run: bool,
+    ) -> dict[str, Any]:
         dockerfile = self.assets / str(profile_data["dockerfile"])
         if not dockerfile.is_file():
             raise ValidationError(f"packaged renderer Dockerfile is missing: {dockerfile.name}")
@@ -2082,26 +2215,34 @@ class Registry:
         payload["ok"] = result.get("returncode") == 0
         return payload
 
+    def build_renderer(self, profile: str = DEFAULT_PROFILE, *, dry_run: bool = False) -> dict[str, Any]:
+        profile_name, profile_data, profile_path = self._load_profile(profile)
+        if dry_run:
+            return self._build_renderer(profile_name, profile_data, profile_path, dry_run=True)
+        with self._renderer_build_lock(str(profile_data["image"])):
+            return self._build_renderer(profile_name, profile_data, profile_path, dry_run=False)
+
     def ensure_renderer(self, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
         profile_name, profile_data, profile_path = self._load_profile(profile)
-        inspected = self._inspect_renderer(profile_name, profile_data, profile_path)
-        if inspected["available"]:
-            return {**inspected, "built": False}
-        build = self.build_renderer(profile_name)
-        if not build.get("ok"):
+        with self._renderer_build_lock(str(profile_data["image"])):
+            inspected = self._inspect_renderer(profile_name, profile_data, profile_path)
+            if inspected["available"]:
+                return {**inspected, "built": False}
+            build = self._build_renderer(profile_name, profile_data, profile_path, dry_run=False)
+            if not build.get("ok"):
+                return {
+                    **inspected,
+                    "ok": False,
+                    "built": True,
+                    "build": build,
+                }
+            rebuilt = self._inspect_renderer(profile_name, profile_data, profile_path)
             return {
-                **inspected,
-                "ok": False,
+                **rebuilt,
+                "ok": bool(rebuilt.get("available")),
                 "built": True,
                 "build": build,
             }
-        rebuilt = self._inspect_renderer(profile_name, profile_data, profile_path)
-        return {
-            **rebuilt,
-            "ok": bool(rebuilt.get("available")),
-            "built": True,
-            "build": build,
-        }
 
     def _container_user(self) -> tuple[int, int]:
         uid = os.getuid() if hasattr(os, "getuid") else 1000
@@ -2165,7 +2306,7 @@ class Registry:
             "--env",
             "XDG_CACHE_HOME=/tmp/.cache",
             "--mount",
-            f"type=bind,source={staging},target=/output",
+            _docker_mount_spec("type=bind", f"source={staging}", "target=/output"),
             "--workdir",
             "/output",
             renderer_image,
@@ -4095,8 +4236,10 @@ class Registry:
             command=command,
         )["mcpServers"]["vegavisuals"]
         server_parts = [server["command"], *server.get("args", [])]
+        server_env = server.get("env", {})
+        env_args = [value for key, value in server_env.items() for value in ("--env", f"{key}={value}")]
         list_command = [resolved_codex, "mcp", "list", "--json"]
-        add = [resolved_codex, "mcp", "add", server_name, "--", *server_parts]
+        add = [resolved_codex, "mcp", "add", server_name, *env_args, "--", *server_parts]
         payload: dict[str, Any] = {
             "ok": True,
             "server_name": server_name,
@@ -4149,6 +4292,7 @@ class Registry:
                 for key, value in transport.items()
                 if key not in {"type", "command", "args"} and value not in (None, "", [], {})
             }
+            expected_behavior = {"env": server_env} if server_env else {}
             outer_behavior = {
                 key: value
                 for key, value in existing.items()
@@ -4160,7 +4304,7 @@ class Registry:
             if (
                 transport.get("type", "stdio") == "stdio"
                 and existing_parts == server_parts
-                and not behavior
+                and behavior == expected_behavior
                 and not outer_behavior
                 and enabled
                 and disabled_reason in (None, "")
@@ -4184,7 +4328,7 @@ class Registry:
         vscode: bool = False,
     ) -> dict[str, Any]:
         server_command = command or sys.executable
-        args = ["--project", workspace_placeholder, "mcp", "serve"]
+        args = ["mcp", "serve"]
         if not command:
             args = ["-m", "vegavisuals.cli", *args]
         if vscode:
@@ -4194,6 +4338,7 @@ class Registry:
                         "type": "stdio",
                         "command": server_command,
                         "args": args,
+                        "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder},
                     }
                 }
             }
@@ -4202,6 +4347,7 @@ class Registry:
                 "vegavisuals": {
                     "command": server_command,
                     "args": args,
+                    "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder},
                 }
             }
         }
@@ -4211,27 +4357,26 @@ class Registry:
         factory_root = factory_metadata_root()
         client = self.client_config()["mcpServers"]["vegavisuals"]
         if checkout is not None:
+            factory_make = ["make", "--no-print-directory", "-C", "${factoryRoot}"]
             factory_launcher = [
                 "bash",
                 "${factoryRoot}/scripts/factory-launcher",
             ]
             project = "${workspaceFolder}"
-            transport = [*factory_launcher, "serve", project]
+            transport = [*factory_make, "mcp-stdio"]
             commands = {
-                "build": [*factory_launcher, "build"],
+                "build": [*factory_make, "mcp-build"],
                 "init": [*factory_launcher, "init", project],
-                "check": [*factory_launcher, "check"],
-                "tests": [*factory_launcher, "tests"],
-                "smoke": [*factory_launcher, "smoke"],
+                "check": [*factory_make, "mcp-check"],
+                "tests": [*factory_make, "tests"],
+                "smoke": [*factory_make, "mcp-smoke"],
                 "down": [*factory_launcher, "down", project],
-                "down_all": [*factory_launcher, "down-all"],
                 "update": [*factory_launcher, "update"],
                 "release_status": [*factory_launcher, "release-status"],
                 "install_check": [*factory_launcher, "install-check"],
                 "install_codex_mcp": [*factory_launcher, "install-codex-mcp", project],
                 "factory_check": [*factory_launcher, "factory-check"],
-                "serve": transport,
-                "client_config": [*factory_launcher, "client-config"],
+                "serve": [*factory_launcher, "serve", project],
                 "manifest": [*factory_launcher, "manifest"],
                 "render": [*factory_launcher, "render", project],
                 "render_all": [*factory_launcher, "render-all", project],
@@ -4239,7 +4384,7 @@ class Registry:
         else:
             package_cli = [sys.executable, "-m", "vegavisuals.cli"]
             project_cli = [*package_cli, "--project", "${workspaceFolder}"]
-            transport = [*project_cli, "mcp", "serve"]
+            transport = [*package_cli, "mcp", "serve"]
             commands = {
                 "build": [*package_cli, "ensure-renderer"],
                 "init": [*project_cli, "init"],
@@ -4247,7 +4392,6 @@ class Registry:
                 "tests": [*package_cli, "self-test"],
                 "smoke": [*package_cli, "mcp-smoke"],
                 "down": [*project_cli, "down"],
-                "down_all": [*package_cli, "down-all"],
                 "update": [*package_cli, "update"],
                 "release_status": [*package_cli, "release-status"],
                 "install_check": [*package_cli, "install-check"],
@@ -4258,7 +4402,7 @@ class Registry:
                     "${workspaceFolder}",
                 ],
                 "factory_check": [*package_cli, "factory-check"],
-                "serve": transport,
+                "serve": [*project_cli, "mcp", "serve"],
                 "client_config": [*package_cli, "mcp", "client-config"],
                 "manifest": [*package_cli, "factory-manifest"],
                 "render": [*project_cli, "render"],
@@ -4270,12 +4414,14 @@ class Registry:
             "name": "vegavisuals",
             "version": __version__,
             "kind": "codex-mcp-factory",
+            "install_scope": "user",
             "description": "Hardened Docker rendering for themed Vega-Lite and Vega visualizations.",
             "license": "GPL-3.0-only",
             "repository": REPOSITORY_URL,
             "factory": str(factory_root),
             "factory_assets": str(self.assets),
             "workspace_rule": {
+                "binding": "consumer",
                 "consumer_root": ".",
                 "source_paths": [MANIFEST_NAME],
                 "generated_paths": [".cache/vegavisuals", LOCK_NAME, RECEIPT_PATH],
@@ -4292,6 +4438,7 @@ class Registry:
             "transport": {
                 "type": "stdio",
                 "command": transport,
+                "env": {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"},
             },
             "commands": commands,
             "mcp": {
@@ -4299,6 +4446,7 @@ class Registry:
                 "transport": "stdio",
                 "consumer_root_fixed_at_startup": True,
                 "command": [client["command"], *client["args"]],
+                "env": client["env"],
                 "tools": list(MCP_TOOL_NAMES),
                 "resources": list(MCP_RESOURCE_URIS),
             },

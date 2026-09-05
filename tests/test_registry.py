@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import errno
 import gc
 import hashlib
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from yaml import safe_dump, safe_load
@@ -24,6 +26,7 @@ from yaml import safe_dump, safe_load
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+import vegavisuals.registry as registry_module
 from vegavisuals import __version__
 from vegavisuals.cli import build_parser, dispatch, main
 from vegavisuals.errors import ManifestError, PolicyError, RenderError, ValidationError
@@ -47,6 +50,17 @@ def write(path: pathlib.Path, value: str | bytes) -> None:
         path.write_bytes(value)
     else:
         path.write_text(value, encoding="utf-8")
+
+
+def docker_mount_source(command: list[str], target: str) -> pathlib.Path:
+    for index, value in enumerate(command):
+        if value != "--mount":
+            continue
+        fields = next(csv.reader([command[index + 1]]))
+        options = dict(field.split("=", 1) for field in fields if "=" in field)
+        if options.get("target") == target:
+            return pathlib.Path(options["source"])
+    raise AssertionError(f"mount target not found: {target}")
 
 
 def vl_spec(url: str | None = None, value: int = 1) -> str:
@@ -142,9 +156,7 @@ class DockerMock:
         if command[:2] != ["docker", "run"]:
             raise AssertionError(f"unexpected command: {command}")
         self.render_commands.append(command)
-        mounts = [command[index + 1] for index, value in enumerate(command) if value == "--mount"]
-        staging_mount = next(value for value in mounts if "target=/output" in value)
-        staging = pathlib.Path(staging_mount.split("source=", 1)[1].split(",target=", 1)[0])
+        staging = docker_mount_source(command, "/output")
         source_name = pathlib.Path(command[command.index("--input") + 1]).name
         output_name = pathlib.Path(command[command.index("--output") + 1]).name
         output_format = command[command.index("--format") + 1]
@@ -215,12 +227,7 @@ class StagedOutputSwapDockerMock(DockerMock):
     def __call__(self, command: list[str], *, cwd: pathlib.Path, timeout: int) -> dict[str, object]:
         result = super().__call__(command, cwd=cwd, timeout=timeout)
         if command[:2] == ["docker", "run"]:
-            mount = next(
-                command[index + 1]
-                for index, value in enumerate(command)
-                if value == "--mount" and "target=/output" in command[index + 1]
-            )
-            staging = pathlib.Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
+            staging = docker_mount_source(command, "/output")
             output = staging / pathlib.Path(command[command.index("--output") + 1]).name
             output.unlink()
             if self.replacement is None:
@@ -352,8 +359,10 @@ class InventoryTest(TemporaryProject):
     def test_factory_manifest_exposes_exact_mcp_contract(self) -> None:
         manifest = self.registry.factory_manifest()
         self.assertEqual(manifest["name"], "vegavisuals")
+        self.assertEqual(manifest["install_scope"], "user")
         self.assertEqual(manifest["license"], "GPL-3.0-only")
         self.assertEqual(manifest["repository"], "https://github.com/dosquartsdedocs/vegavisuals")
+        self.assertEqual(manifest["workspace_rule"]["binding"], "consumer")
         self.assertTrue(manifest["mcp"]["consumer_root_fixed_at_startup"])
         self.assertEqual(tuple(manifest["mcp"]["tools"]), TOOL_NAMES)
         self.assertEqual(tuple(manifest["mcp"]["resources"]), RESOURCE_URIS)
@@ -362,6 +371,7 @@ class InventoryTest(TemporaryProject):
         self.assertEqual(static["schema_version"], manifest["schema_version"])
         self.assertEqual(static["version"], __version__)
         self.assertEqual(static["kind"], manifest["kind"])
+        self.assertEqual(static["install_scope"], manifest["install_scope"])
         self.assertEqual(static["description"], manifest["description"])
         self.assertEqual(static["license"], manifest["license"])
         self.assertEqual(static["repository"], manifest["repository"])
@@ -378,7 +388,7 @@ class InventoryTest(TemporaryProject):
         for key in ("server_name", "transport", "consumer_root_fixed_at_startup"):
             self.assertEqual(static["mcp"][key], manifest["mcp"][key])
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-        for variable in ("PROJECT", "PROFILE", "FAMILY", "ENGINE", "FORMAT", "INPUT", "OUTPUT"):
+        for variable in ("PROJECT", "PROFILE", "FAMILY", "ENGINE", "FORMAT", "INPUT", "OUTPUT", "CURDIR"):
             self.assertNotIn(f"$({variable})", makefile)
 
     def test_installed_manifest_uses_the_current_python_without_a_factory_makefile(self) -> None:
@@ -386,15 +396,21 @@ class InventoryTest(TemporaryProject):
             manifest = self.registry.factory_manifest()
             check = self.registry.factory_check()
         command = manifest["transport"]["command"]
+        self.assertEqual(manifest["install_scope"], "user")
         self.assertEqual(command[:3], [sys.executable, "-m", "vegavisuals.cli"])
+        self.assertEqual(command[3:], ["mcp", "serve"])
+        self.assertEqual(
+            manifest["transport"]["env"],
+            {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"},
+        )
         self.assertNotIn("make", command)
         self.assertEqual(manifest["commands"]["init"][-1], "init")
         self.assertEqual(manifest["commands"]["check"][-1], "factory-lifecycle-check")
         self.assertEqual(manifest["commands"]["tests"][-1], "self-test")
         self.assertEqual(manifest["commands"]["smoke"][-1], "mcp-smoke")
         self.assertEqual(manifest["commands"]["down"][-1], "down")
-        self.assertEqual(manifest["commands"]["down_all"][-1], "down-all")
-        for name in ("build", "check", "tests", "smoke", "down_all", "client_config", "manifest"):
+        self.assertNotIn("down_all", manifest["commands"])
+        for name in ("build", "check", "tests", "smoke", "client_config", "manifest"):
             self.assertNotIn("${workspaceFolder}", manifest["commands"][name])
         for name in ("init", "down", "serve", "render", "render_all"):
             self.assertIn("${workspaceFolder}", manifest["commands"][name])
@@ -402,6 +418,7 @@ class InventoryTest(TemporaryProject):
         package_manifest = safe_load(
             (REPO_ROOT / "src/vegavisuals/factory/mcp-factory.yml").read_text(encoding="utf-8")
         )
+        self.assertEqual(package_manifest["install_scope"], manifest["install_scope"])
         self.assertEqual(set(package_manifest["commands"]), set(manifest["commands"]))
         self.assertFalse(package_manifest["discovery"]["checkout_required_for_make_lifecycle"])
         serialized = json.dumps(package_manifest)
@@ -412,21 +429,46 @@ class InventoryTest(TemporaryProject):
     def test_checkout_manifest_scopes_only_project_operations(self) -> None:
         manifest = self.registry.factory_manifest()
         launcher = ["bash", "${factoryRoot}/scripts/factory-launcher"]
+        factory_make = ["make", "--no-print-directory", "-C", "${factoryRoot}"]
 
-        self.assertEqual(manifest["commands"]["build"], [*launcher, "build"])
-        self.assertEqual(manifest["commands"]["check"], [*launcher, "check"])
-        self.assertEqual(manifest["commands"]["smoke"], [*launcher, "smoke"])
+        self.assertEqual(manifest["commands"]["build"], [*factory_make, "mcp-build"])
+        self.assertEqual(manifest["commands"]["check"], [*factory_make, "mcp-check"])
+        self.assertEqual(manifest["commands"]["tests"], [*factory_make, "tests"])
+        self.assertEqual(manifest["commands"]["smoke"], [*factory_make, "mcp-smoke"])
         self.assertEqual(manifest["commands"]["manifest"], [*launcher, "manifest"])
-        self.assertEqual(manifest["commands"]["client_config"], [*launcher, "client-config"])
+        self.assertNotIn("client_config", manifest["commands"])
+        self.assertNotIn("down_all", manifest["commands"])
         self.assertEqual(
             manifest["commands"]["down"],
             [*launcher, "down", "${workspaceFolder}"],
         )
-        self.assertEqual(manifest["commands"]["down_all"], [*launcher, "down-all"])
         self.assertEqual(
             manifest["transport"]["command"],
-            [*launcher, "serve", "${workspaceFolder}"],
+            ["make", "--no-print-directory", "-C", "${factoryRoot}", "mcp-stdio"],
         )
+        self.assertEqual(
+            manifest["transport"]["env"],
+            {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"},
+        )
+
+    def test_registry_pins_an_absolute_consumer_root_before_cwd_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as other_tmp:
+            previous = pathlib.Path.cwd()
+            pinned: Registry | None = None
+            try:
+                os.chdir(self.root.parent)
+                pinned = Registry(self.root.name, runner=DockerMock())
+                os.chdir(other_tmp)
+                pinned.initialize_project()
+            finally:
+                os.chdir(previous)
+
+            assert pinned is not None
+            self.assertEqual(pinned.project_root, self.root.resolve())
+            self.assertTrue(pinned.project_root.is_absolute())
+            self.assertTrue((self.root / ".vegavisuals.yml").is_file())
+            self.assertFalse((pathlib.Path(other_tmp) / ".vegavisuals.yml").exists())
+            pinned.close()
 
     def test_manifest_and_client_config_ignore_a_nonexistent_workspace_placeholder(self) -> None:
         placeholder = "${workspaceFolder}"
@@ -438,7 +480,8 @@ class InventoryTest(TemporaryProject):
         with patch("vegavisuals.cli._print") as output:
             self.assertEqual(main(["--project", placeholder, "mcp", "client-config"]), 0)
             server = output.call_args.args[0]["mcpServers"]["vegavisuals"]
-            self.assertIn(placeholder, server["args"])
+            self.assertNotIn(placeholder, server["args"])
+            self.assertEqual(server["env"], {"MCP_CONSUMER_WORKSPACE": placeholder})
 
     def test_down_removes_only_valid_factory_container_ids(self) -> None:
         listed = {
@@ -574,7 +617,49 @@ class InventoryTest(TemporaryProject):
         server = self.registry.client_config()["mcpServers"]["vegavisuals"]
         self.assertEqual(server["command"], sys.executable)
         self.assertEqual(server["args"][:2], ["-m", "vegavisuals.cli"])
-        self.assertIn(str("${workspaceFolder}"), server["args"])
+        self.assertNotIn(str("${workspaceFolder}"), server["args"])
+        self.assertEqual(server["env"], {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"})
+
+    def test_cli_scopes_the_consumer_environment_to_mcp_serve(self) -> None:
+        project = "/tmp/consumer $value $(touch never) `touch never-either`"
+        for arguments in (["version"], ["mcp", "list-tools"]):
+            with self.subTest(arguments=arguments), patch.dict(
+                os.environ, {"MCP_CONSUMER_WORKSPACE": project}
+            ), patch("vegavisuals.cli.Registry") as registry_class, patch("vegavisuals.cli._print"):
+                registry_class.return_value.version_status.return_value = {"ok": True}
+                self.assertEqual(main(arguments), 0)
+            registry_class.assert_called_once_with(".")
+
+        with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}), patch(
+            "vegavisuals.cli.Registry"
+        ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
+            self.assertEqual(main(["mcp", "serve"]), 0)
+        registry_class.assert_called_once_with(project)
+        run_server.assert_called_once_with(registry_class.return_value)
+
+        explicit = "/tmp/explicit-project"
+        with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}), patch(
+            "vegavisuals.cli.Registry"
+        ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
+            self.assertEqual(main(["--project", explicit, "mcp", "serve"]), 0)
+        registry_class.assert_called_once_with(explicit)
+        run_server.assert_called_once_with(registry_class.return_value)
+
+    def test_factory_check_compares_install_scope(self) -> None:
+        static = safe_load((REPO_ROOT / "mcp-factory.yml").read_text(encoding="utf-8"))
+        static["install_scope"] = "workspace"
+        static["factory_assets"] = str(self.registry.assets)
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata_root = pathlib.Path(tmp)
+            (metadata_root / "mcp-factory.yml").write_text(
+                safe_dump(static, sort_keys=False),
+                encoding="utf-8",
+            )
+            with patch("vegavisuals.registry.factory_metadata_root", return_value=metadata_root):
+                result = self.registry.factory_check()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("static factory manifest does not match dynamic install_scope", result["issues"])
 
     def test_package_release_and_update_are_non_mutating(self) -> None:
         with patch("vegavisuals.registry.source_checkout", return_value=None):
@@ -637,8 +722,9 @@ class InventoryTest(TemporaryProject):
     def test_codex_install_dry_run_uses_startup_fixed_project(self) -> None:
         result = self.registry.install_codex_mcp(dry_run=True, codex_bin="codex-test")
         self.assertTrue(result["ok"])
-        self.assertIn(str(self.root), result["add"])
+        self.assertIn(f"MCP_CONSUMER_WORKSPACE={self.root}", result["add"])
         self.assertIn("-m", result["add"])
+        self.assertNotIn("--project", result["add"])
 
     def test_codex_install_preserves_a_different_registration(self) -> None:
         existing = {
@@ -673,6 +759,35 @@ class InventoryTest(TemporaryProject):
             result = self.registry.install_codex_mcp()
         self.assertFalse(result["ok"])
         self.assertIn("refusing", result["message"])
+        run.assert_called_once()
+
+    def test_codex_install_recognizes_the_same_environment_registration(self) -> None:
+        existing = {
+            "command": ["codex", "mcp", "list"],
+            "returncode": 0,
+            "stdout": json.dumps(
+                [
+                    {
+                        "name": "vegavisuals",
+                        "enabled": True,
+                        "transport": {
+                            "type": "stdio",
+                            "command": sys.executable,
+                            "args": ["-m", "vegavisuals.cli", "mcp", "serve"],
+                            "env": {"MCP_CONSUMER_WORKSPACE": str(self.root)},
+                        },
+                    }
+                ]
+            ),
+            "stderr": "",
+        }
+        with (
+            patch("vegavisuals.registry.shutil.which", return_value="/usr/bin/codex"),
+            patch("vegavisuals.registry._run_command", return_value=existing) as run,
+        ):
+            result = self.registry.install_codex_mcp()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["already_configured"])
         run.assert_called_once()
 
     def test_root_and_packaged_dockerfiles_are_semantically_synchronized(self) -> None:
@@ -1026,6 +1141,30 @@ class ValidationContractTest(TemporaryProject):
 
 
 class DockerCommandTest(TemporaryProject):
+    def test_renderer_lock_name_scopes_docker_endpoint_context_and_image(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DOCKER_CONTEXT": "", "DOCKER_HOST": "unix:///daemon-one.sock", "XDG_CACHE_HOME": "/tmp/cache-one"},
+        ):
+            first = registry_module._renderer_lock_name("vegavisuals/render:test")
+        with patch.dict(
+            os.environ,
+            {"DOCKER_CONTEXT": "", "DOCKER_HOST": "unix:///daemon-one.sock", "XDG_CACHE_HOME": "/tmp/cache-two"},
+        ):
+            same_daemon = registry_module._renderer_lock_name("vegavisuals/render:test")
+            other_image = registry_module._renderer_lock_name("vegavisuals/render:other")
+        with patch.dict(os.environ, {"DOCKER_CONTEXT": "remote", "DOCKER_HOST": "unix:///daemon-one.sock"}):
+            other_context = registry_module._renderer_lock_name("vegavisuals/render:test")
+
+        self.assertEqual(first, same_daemon)
+        self.assertNotEqual(first, other_image)
+        self.assertNotEqual(first, other_context)
+
+    def test_renderer_build_lock_does_not_mask_body_oserror(self) -> None:
+        with self.assertRaisesRegex(OSError, "renderer body failed"):
+            with self.registry._renderer_build_lock("vegavisuals/render:test-body-error"):
+                raise OSError("renderer body failed")
+
     def test_runtime_command_is_hardened_without_exposing_the_project(self) -> None:
         write(self.root / "chart.vl.json", vl_spec())
         result = self.registry.render_visualization("chart.vl.json", "out/chart.svg")
@@ -1069,6 +1208,27 @@ class DockerCommandTest(TemporaryProject):
 
         self.assertTrue(result["ok"])
         self.assertNotIn(str(root), result["command"])
+
+    def test_staging_mount_csv_encodes_tmpdir_with_commas_and_quotes(self) -> None:
+        write(self.root / "chart.vl.json", vl_spec())
+        with tempfile.TemporaryDirectory() as temporary:
+            tmpdir = pathlib.Path(temporary) / 'tmp,with"quote'
+            tmpdir.mkdir()
+            previous_tempdir = tempfile.tempdir
+            with patch.dict(os.environ, {"TMPDIR": str(tmpdir)}):
+                tempfile.tempdir = None
+                try:
+                    result = self.registry.render_visualization("chart.vl.json", "chart.svg")
+                finally:
+                    tempfile.tempdir = previous_tempdir
+
+        mount = next(
+            result["command"][index + 1]
+            for index, value in enumerate(result["command"])
+            if value == "--mount"
+        )
+        self.assertEqual(docker_mount_source(result["command"], "/output").parent, tmpdir)
+        self.assertIn('""', mount)
 
     def test_build_command_uses_packaged_context_and_exact_version(self) -> None:
         result = self.registry.build_renderer(dry_run=True)
@@ -1958,6 +2118,65 @@ class MCPContractTest(TemporaryProject):
         self.assertTrue(inferred["ok"])
         self.assertEqual(inferred["format"], "png")
 
+    def test_two_fixed_server_roots_render_concurrently_without_crossing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as other_tmp:
+            other_root = pathlib.Path(other_tmp)
+            other_runner = DockerMock()
+            other_registry = Registry(other_root, runner=other_runner)
+            other_runner.renderer_contract = other_registry._renderer_contract(
+                other_registry.assets / "compat/vl-convert-1.9.0.json"
+            )
+            first_server = create_server(self.registry, FakeMCP)
+            second_server = create_server(other_registry, FakeMCP)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [
+                        executor.submit(
+                            first_server.tools["render_visualization_text"],
+                            vl_spec(value=1),
+                            output_path="out/first.svg",
+                        ),
+                        executor.submit(
+                            second_server.tools["render_visualization_text"],
+                            vl_spec(value=2),
+                            output_path="out/second.svg",
+                        ),
+                    ]
+                    results = [future.result(timeout=15) for future in futures]
+
+                self.assertTrue(all(result["ok"] for result in results), results)
+                self.assertTrue((self.root / "out/first.svg").is_file())
+                self.assertFalse((self.root / "out/second.svg").exists())
+                self.assertTrue((other_root / "out/second.svg").is_file())
+                self.assertFalse((other_root / "out/first.svg").exists())
+                first_lock = json.loads((self.root / LOCK_NAME).read_text(encoding="utf-8"))
+                second_lock = json.loads((other_root / LOCK_NAME).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    {entry["output"] for entry in first_lock["visualizations"].values()},
+                    {"out/first.svg"},
+                )
+                self.assertEqual(
+                    {entry["output"] for entry in second_lock["visualizations"].values()},
+                    {"out/second.svg"},
+                )
+                first_labels = [
+                    command[index + 1]
+                    for command in self.runner.render_commands
+                    for index, value in enumerate(command)
+                    if value == "--label"
+                ]
+                second_labels = [
+                    command[index + 1]
+                    for command in other_runner.render_commands
+                    for index, value in enumerate(command)
+                    if value == "--label"
+                ]
+                self.assertIn(f"{CONTAINER_WORKSPACE_LABEL}={workspace_id(self.root)}", first_labels)
+                self.assertIn(f"{CONTAINER_WORKSPACE_LABEL}={workspace_id(other_root)}", second_labels)
+                self.assertNotEqual(workspace_id(self.root), workspace_id(other_root))
+            finally:
+                other_registry.close()
+
     def test_cli_contract_commands_return_json(self) -> None:
         for arguments in (["version"], ["theme-inventory"], ["mcp", "list-tools"]):
             completed = subprocess.run(
@@ -1996,6 +2215,26 @@ class MCPContractTest(TemporaryProject):
         )
         self.assertEqual(oversized.returncode, 1)
         self.assertEqual(json.loads(oversized.stdout)["error"]["type"], "ValidationError")
+
+    def test_mcp_startup_error_does_not_write_to_protocol_stdout(self) -> None:
+        missing = self.root / "missing-consumer"
+        completed = subprocess.run(
+            [sys.executable, "-m", "vegavisuals.cli", "mcp", "serve"],
+            cwd=REPO_ROOT,
+            env={
+                **os.environ,
+                "MCP_CONSUMER_WORKSPACE": str(missing),
+                "PYTHONPATH": str(REPO_ROOT / "src"),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(json.loads(completed.stderr)["error"]["type"], "PolicyError")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -39,7 +40,11 @@ def _add_render_policy_options(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = JSONArgumentParser(prog="vegavisuals")
-    parser.add_argument("--project", default=".", help="Consumer project root, fixed when the process starts")
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Consumer project root; MCP serve defaults to MCP_CONSUMER_WORKSPACE",
+    )
     parser.add_argument("--version", action="version", version=f"vegavisuals {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -374,14 +379,30 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    stdio_serve = args.command == "mcp" and args.mcp_command == "serve"
+
+    def print_error(payload: dict[str, Any]) -> None:
+        if stdio_serve:
+            print(json_dumps(payload), file=sys.stderr)
+        else:
+            _print(payload)
+
     try:
-        project = "." if args.command == "factory-manifest" or (
+        metadata_only = args.command == "factory-manifest" or (
             args.command == "mcp" and args.mcp_command == "client-config"
-        ) else args.project
+        )
+        if metadata_only:
+            project = "."
+        elif args.project is not None:
+            project = args.project
+        elif stdio_serve:
+            project = os.environ.get("MCP_CONSUMER_WORKSPACE", ".")
+        else:
+            project = "."
         registry = Registry(project)
         return dispatch(args, registry)
     except RecursionError as exc:
-        _print(
+        print_error(
             {
                 "ok": False,
                 "error": {"type": "ValidationError", "message": f"input nesting exceeds parser limits: {exc}"},
@@ -389,10 +410,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     except (VegavisualsError, OSError, ValueError) as exc:
-        _print({"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}})
+        print_error({"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}})
         return 1
     except KeyboardInterrupt:
-        print(json.dumps({"ok": False, "error": {"type": "KeyboardInterrupt", "message": "interrupted"}}))
+        print_error({"ok": False, "error": {"type": "KeyboardInterrupt", "message": "interrupted"}})
         return 130
 
 

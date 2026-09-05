@@ -10,6 +10,8 @@ import sys
 import tempfile
 import unittest
 
+from yaml import safe_load
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
@@ -25,16 +27,30 @@ class MCPStdioSmokeTest(unittest.TestCase):
             from mcp.client.stdio import stdio_client
 
             with tempfile.TemporaryDirectory() as temporary:
-                project = pathlib.Path(temporary)
+                project = pathlib.Path(temporary) / (
+                    "consumer $dollar $(shell printf make-expanded) `printf tick-expanded`"
+                )
+                project.mkdir()
                 shutil.copytree(REPO_ROOT / "examples", project / "examples")
                 executable = os.environ.get("VEGAVISUALS_MCP_COMMAND")
                 arguments_json = os.environ.get("VEGAVISUALS_MCP_ARGS_JSON")
                 factory_root = os.environ.get("VEGAVISUALS_MCP_FACTORY_ROOT")
                 environment = dict(os.environ)
-                if executable and factory_root:
+                environment["MCP_CONSUMER_WORKSPACE"] = str(project)
+                if factory_root:
                     environment.pop("PYTHONPATH", None)
-                    command = executable
-                    args = [str(pathlib.Path(factory_root) / "scripts/factory-launcher"), "serve", str(project)]
+                    factory = pathlib.Path(factory_root).resolve()
+                    manifest = safe_load((factory / "mcp-factory.yml").read_text(encoding="utf-8"))
+                    transport = manifest["transport"]
+
+                    def expand(value: object) -> str:
+                        return str(value).replace("${factoryRoot}", str(factory)).replace(
+                            "${workspaceFolder}", str(project)
+                        )
+
+                    transport_command = [expand(value) for value in transport["command"]]
+                    command, *args = transport_command
+                    environment.update({str(key): expand(value) for key, value in transport.get("env", {}).items()})
                 elif executable and arguments_json:
                     environment.pop("PYTHONPATH", None)
                     command = executable
@@ -45,14 +61,12 @@ class MCPStdioSmokeTest(unittest.TestCase):
                 elif executable:
                     environment.pop("PYTHONPATH", None)
                     command = executable
-                    args = ["--project", str(project), "mcp", "serve"]
+                    args = ["mcp", "serve"]
                 else:
                     command = sys.executable
                     args = [
                         "-m",
                         "vegavisuals.cli",
-                        "--project",
-                        str(project),
                         "mcp",
                         "serve",
                     ]

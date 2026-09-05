@@ -2,11 +2,13 @@ schema_version: 1
 name: vegavisuals
 version: 0.3.1
 kind: codex-mcp-factory
+install_scope: user
 description: Hardened Docker rendering for themed Vega-Lite and Vega visualizations.
 license: GPL-3.0-only
 repository: https://github.com/dosquartsdedocs/vegavisuals
 factory_assets: src/vegavisuals/assets
 workspace_rule:
+  binding: consumer
   consumer_root: .
   source_paths:
     - .vegavisuals.yml
@@ -26,42 +28,16 @@ runtime:
   mcp_version: 1.29.0
 transport:
   type: stdio
-  command:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - serve
-    - ${workspaceFolder}
+  command: [make, --no-print-directory, -C, "${factoryRoot}", mcp-stdio]
+  env:
+    MCP_CONSUMER_WORKSPACE: "${workspaceFolder}"
 commands:
-  build:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - build
-  init:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - init
-    - ${workspaceFolder}
-  check:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - check
-  tests:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - tests
-  smoke:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - smoke
-  down:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - down
-    - ${workspaceFolder}
-  down_all:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - down-all
+  build: [make, --no-print-directory, -C, "${factoryRoot}", mcp-build]
+  init: [bash, "${factoryRoot}/scripts/factory-launcher", init, "${workspaceFolder}"]
+  check: [make, --no-print-directory, -C, "${factoryRoot}", mcp-check]
+  tests: [make, --no-print-directory, -C, "${factoryRoot}", tests]
+  smoke: [make, --no-print-directory, -C, "${factoryRoot}", mcp-smoke]
+  down: [bash, "${factoryRoot}/scripts/factory-launcher", down, "${workspaceFolder}"]
   update:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
@@ -83,15 +59,7 @@ commands:
     - bash
     - ${factoryRoot}/scripts/factory-launcher
     - factory-check
-  serve:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - serve
-    - ${workspaceFolder}
-  client_config:
-    - bash
-    - ${factoryRoot}/scripts/factory-launcher
-    - client-config
+  serve: [bash, "${factoryRoot}/scripts/factory-launcher", serve, "${workspaceFolder}"]
   manifest:
     - bash
     - ${factoryRoot}/scripts/factory-launcher

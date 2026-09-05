@@ -5,10 +5,14 @@ FACTORY_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OPERATION="${1:?factory operation is required}"
 shift
 
-CLI="${FACTORY_ROOT}/.cache/vegavisuals/mcp-venv/bin/vegavisuals"
+CLI=""
 
 bootstrap() {
-  make --silent --no-print-directory -C "${FACTORY_ROOT}" mcp-env
+  CLI="$(env -u MCP_CONSUMER_WORKSPACE make --silent --no-print-directory -C "${FACTORY_ROOT}" mcp-cli-path)"
+  [[ -x "${CLI}" ]] || {
+    printf 'vegavisuals MCP CLI is unavailable: %s\n' "${CLI}" >&2
+    exit 1
+  }
 }
 
 case "${OPERATION}" in
@@ -66,8 +70,14 @@ case "${OPERATION}" in
     exec "${CLI}" --project "${FACTORY_ROOT}" factory-check "$@"
     ;;
   serve)
-    PROJECT_ROOT="${1:?consumer project root is required}"
-    shift
+    PROJECT_ROOT="${1:-${MCP_CONSUMER_WORKSPACE:-}}"
+    [[ -n "${PROJECT_ROOT}" ]] || {
+      printf 'Consumer project root is required\n' >&2
+      exit 2
+    }
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
     bootstrap
     "${CLI}" --project "${PROJECT_ROOT}" install-check --command "${CLI}" >/dev/null
     "${CLI}" --project "${PROJECT_ROOT}" ensure-renderer >/dev/null
