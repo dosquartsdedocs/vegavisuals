@@ -32,11 +32,11 @@ transport:
   env:
     MCP_CONSUMER_WORKSPACE: "${workspaceFolder}"
 commands:
-  build: [make, mcp-build]
+  build: [make, --no-print-directory, -C, "${factoryRoot}", mcp-build]
   init: [bash, "${factoryRoot}/scripts/factory-launcher", init, "${workspaceFolder}"]
-  check: [make, mcp-check]
-  tests: [make, tests]
-  smoke: [make, mcp-smoke]
+  check: [make, --no-print-directory, -C, "${factoryRoot}", mcp-check]
+  tests: [make, --no-print-directory, -C, "${factoryRoot}", tests]
+  smoke: [make, --no-print-directory, -C, "${factoryRoot}", mcp-smoke]
   down: [bash, "${factoryRoot}/scripts/factory-launcher", down, "${workspaceFolder}"]
   update:
     - bash

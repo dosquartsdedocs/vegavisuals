@@ -42,8 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = JSONArgumentParser(prog="vegavisuals")
     parser.add_argument(
         "--project",
-        default=os.environ.get("MCP_CONSUMER_WORKSPACE", "."),
-        help="Consumer project root, fixed when the process starts",
+        default=None,
+        help="Consumer project root; MCP serve defaults to MCP_CONSUMER_WORKSPACE",
     )
     parser.add_argument("--version", action="version", version=f"vegavisuals {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -388,9 +388,17 @@ def main(argv: list[str] | None = None) -> int:
             _print(payload)
 
     try:
-        project = "." if args.command == "factory-manifest" or (
+        metadata_only = args.command == "factory-manifest" or (
             args.command == "mcp" and args.mcp_command == "client-config"
-        ) else args.project
+        )
+        if metadata_only:
+            project = "."
+        elif args.project is not None:
+            project = args.project
+        elif stdio_serve:
+            project = os.environ.get("MCP_CONSUMER_WORKSPACE", ".")
+        else:
+            project = "."
         registry = Registry(project)
         return dispatch(args, registry)
     except RecursionError as exc:

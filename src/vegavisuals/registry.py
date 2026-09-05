@@ -1517,6 +1517,7 @@ class Registry:
                     "name": dynamic["name"],
                     "version": dynamic["version"],
                     "kind": dynamic["kind"],
+                    "install_scope": dynamic["install_scope"],
                     "description": dynamic["description"],
                     "license": dynamic["license"],
                     "repository": dynamic["repository"],
@@ -4356,18 +4357,19 @@ class Registry:
         factory_root = factory_metadata_root()
         client = self.client_config()["mcpServers"]["vegavisuals"]
         if checkout is not None:
+            factory_make = ["make", "--no-print-directory", "-C", "${factoryRoot}"]
             factory_launcher = [
                 "bash",
                 "${factoryRoot}/scripts/factory-launcher",
             ]
             project = "${workspaceFolder}"
-            transport = ["make", "--no-print-directory", "-C", "${factoryRoot}", "mcp-stdio"]
+            transport = [*factory_make, "mcp-stdio"]
             commands = {
-                "build": ["make", "mcp-build"],
+                "build": [*factory_make, "mcp-build"],
                 "init": [*factory_launcher, "init", project],
-                "check": ["make", "mcp-check"],
-                "tests": ["make", "tests"],
-                "smoke": ["make", "mcp-smoke"],
+                "check": [*factory_make, "mcp-check"],
+                "tests": [*factory_make, "tests"],
+                "smoke": [*factory_make, "mcp-smoke"],
                 "down": [*factory_launcher, "down", project],
                 "update": [*factory_launcher, "update"],
                 "release_status": [*factory_launcher, "release-status"],
@@ -4412,6 +4414,7 @@ class Registry:
             "name": "vegavisuals",
             "version": __version__,
             "kind": "codex-mcp-factory",
+            "install_scope": "user",
             "description": "Hardened Docker rendering for themed Vega-Lite and Vega visualizations.",
             "license": "GPL-3.0-only",
             "repository": REPOSITORY_URL,

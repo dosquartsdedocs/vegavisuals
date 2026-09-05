@@ -359,6 +359,7 @@ class InventoryTest(TemporaryProject):
     def test_factory_manifest_exposes_exact_mcp_contract(self) -> None:
         manifest = self.registry.factory_manifest()
         self.assertEqual(manifest["name"], "vegavisuals")
+        self.assertEqual(manifest["install_scope"], "user")
         self.assertEqual(manifest["license"], "GPL-3.0-only")
         self.assertEqual(manifest["repository"], "https://github.com/dosquartsdedocs/vegavisuals")
         self.assertEqual(manifest["workspace_rule"]["binding"], "consumer")
@@ -370,6 +371,7 @@ class InventoryTest(TemporaryProject):
         self.assertEqual(static["schema_version"], manifest["schema_version"])
         self.assertEqual(static["version"], __version__)
         self.assertEqual(static["kind"], manifest["kind"])
+        self.assertEqual(static["install_scope"], manifest["install_scope"])
         self.assertEqual(static["description"], manifest["description"])
         self.assertEqual(static["license"], manifest["license"])
         self.assertEqual(static["repository"], manifest["repository"])
@@ -394,6 +396,7 @@ class InventoryTest(TemporaryProject):
             manifest = self.registry.factory_manifest()
             check = self.registry.factory_check()
         command = manifest["transport"]["command"]
+        self.assertEqual(manifest["install_scope"], "user")
         self.assertEqual(command[:3], [sys.executable, "-m", "vegavisuals.cli"])
         self.assertEqual(command[3:], ["mcp", "serve"])
         self.assertEqual(
@@ -415,6 +418,7 @@ class InventoryTest(TemporaryProject):
         package_manifest = safe_load(
             (REPO_ROOT / "src/vegavisuals/factory/mcp-factory.yml").read_text(encoding="utf-8")
         )
+        self.assertEqual(package_manifest["install_scope"], manifest["install_scope"])
         self.assertEqual(set(package_manifest["commands"]), set(manifest["commands"]))
         self.assertFalse(package_manifest["discovery"]["checkout_required_for_make_lifecycle"])
         serialized = json.dumps(package_manifest)
@@ -425,10 +429,12 @@ class InventoryTest(TemporaryProject):
     def test_checkout_manifest_scopes_only_project_operations(self) -> None:
         manifest = self.registry.factory_manifest()
         launcher = ["bash", "${factoryRoot}/scripts/factory-launcher"]
+        factory_make = ["make", "--no-print-directory", "-C", "${factoryRoot}"]
 
-        self.assertEqual(manifest["commands"]["build"], ["make", "mcp-build"])
-        self.assertEqual(manifest["commands"]["check"], ["make", "mcp-check"])
-        self.assertEqual(manifest["commands"]["smoke"], ["make", "mcp-smoke"])
+        self.assertEqual(manifest["commands"]["build"], [*factory_make, "mcp-build"])
+        self.assertEqual(manifest["commands"]["check"], [*factory_make, "mcp-check"])
+        self.assertEqual(manifest["commands"]["tests"], [*factory_make, "tests"])
+        self.assertEqual(manifest["commands"]["smoke"], [*factory_make, "mcp-smoke"])
         self.assertEqual(manifest["commands"]["manifest"], [*launcher, "manifest"])
         self.assertNotIn("client_config", manifest["commands"])
         self.assertNotIn("down_all", manifest["commands"])
@@ -614,11 +620,46 @@ class InventoryTest(TemporaryProject):
         self.assertNotIn(str("${workspaceFolder}"), server["args"])
         self.assertEqual(server["env"], {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"})
 
-    def test_cli_uses_the_literal_consumer_environment_as_its_default_root(self) -> None:
+    def test_cli_scopes_the_consumer_environment_to_mcp_serve(self) -> None:
         project = "/tmp/consumer $value $(touch never) `touch never-either`"
-        with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}):
-            args = build_parser().parse_args(["mcp", "serve"])
-        self.assertEqual(args.project, project)
+        for arguments in (["version"], ["mcp", "list-tools"]):
+            with self.subTest(arguments=arguments), patch.dict(
+                os.environ, {"MCP_CONSUMER_WORKSPACE": project}
+            ), patch("vegavisuals.cli.Registry") as registry_class, patch("vegavisuals.cli._print"):
+                registry_class.return_value.version_status.return_value = {"ok": True}
+                self.assertEqual(main(arguments), 0)
+            registry_class.assert_called_once_with(".")
+
+        with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}), patch(
+            "vegavisuals.cli.Registry"
+        ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
+            self.assertEqual(main(["mcp", "serve"]), 0)
+        registry_class.assert_called_once_with(project)
+        run_server.assert_called_once_with(registry_class.return_value)
+
+        explicit = "/tmp/explicit-project"
+        with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}), patch(
+            "vegavisuals.cli.Registry"
+        ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
+            self.assertEqual(main(["--project", explicit, "mcp", "serve"]), 0)
+        registry_class.assert_called_once_with(explicit)
+        run_server.assert_called_once_with(registry_class.return_value)
+
+    def test_factory_check_compares_install_scope(self) -> None:
+        static = safe_load((REPO_ROOT / "mcp-factory.yml").read_text(encoding="utf-8"))
+        static["install_scope"] = "workspace"
+        static["factory_assets"] = str(self.registry.assets)
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata_root = pathlib.Path(tmp)
+            (metadata_root / "mcp-factory.yml").write_text(
+                safe_dump(static, sort_keys=False),
+                encoding="utf-8",
+            )
+            with patch("vegavisuals.registry.factory_metadata_root", return_value=metadata_root):
+                result = self.registry.factory_check()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("static factory manifest does not match dynamic install_scope", result["issues"])
 
     def test_package_release_and_update_are_non_mutating(self) -> None:
         with patch("vegavisuals.registry.source_checkout", return_value=None):

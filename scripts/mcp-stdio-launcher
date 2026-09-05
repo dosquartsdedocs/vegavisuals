@@ -7,7 +7,11 @@ CONSUMER="${MCP_CONSUMER_WORKSPACE:-${PROJECT:-}}"
   printf 'MCP_CONSUMER_WORKSPACE or PROJECT is required\n' >&2
   exit 2
 }
-CONSUMER="$(realpath -e -- "${CONSUMER}")"
+if ! RESOLVED_CONSUMER="$(realpath -e -- "${CONSUMER}" 2>/dev/null)"; then
+  printf 'Consumer workspace cannot be resolved: %s\n' "${CONSUMER}" >&2
+  exit 2
+fi
+CONSUMER="${RESOLVED_CONSUMER}"
 [[ -d "${CONSUMER}" ]] || {
   printf 'Consumer workspace is not a directory: %s\n' "${CONSUMER}" >&2
   exit 2

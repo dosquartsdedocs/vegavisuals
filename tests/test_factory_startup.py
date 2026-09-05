@@ -26,6 +26,22 @@ def independent_make_environment() -> dict[str, str]:
 
 
 class FactoryStartupTest(unittest.TestCase):
+    def test_stdio_launcher_reports_unresolvable_workspace(self) -> None:
+        missing = REPO_ROOT / "missing-consumer-workspace"
+        completed = subprocess.run(
+            ["bash", str(REPO_ROOT / "scripts/mcp-stdio-launcher"), "/bin/true"],
+            cwd=REPO_ROOT,
+            env={**os.environ, "MCP_CONSUMER_WORKSPACE": str(missing)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, f"Consumer workspace cannot be resolved: {missing}\n")
+
     def test_mcp_environment_key_tracks_version_and_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
