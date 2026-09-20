@@ -4,7 +4,7 @@
     "local-csv-bars": {
       "engine": "vega-lite",
       "family": "benizar",
-      "fingerprint": "006f619fabe0b10692d46daa8e6ee08a4facd7c23382f720403c86081c191704",
+      "fingerprint": "d39c4051d411ea0b833b5c017dfc980ab41dbcdd80f8efc892f16857c382e19b",
       "format": "svg",
       "inputs": [
         "examples/vega-lite/data/quarters.csv"
@@ -24,7 +24,7 @@
     "raw-vega-latency": {
       "engine": "vega",
       "family": "benizar",
-      "fingerprint": "72df997da1157f7cd5a1000e614d6017c440fa77956543051412fb129c1a6dec",
+      "fingerprint": "92bc141731e80947d26352dd3bf88a26a5ac4247f08e72b620acc81da4a001e4",
       "format": "svg",
       "inputs": [],
       "output": "examples/rendered/raw-vega.svg",

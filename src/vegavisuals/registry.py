@@ -4427,6 +4427,36 @@ class Registry:
                 "generated_paths": [".cache/vegavisuals", LOCK_NAME, RECEIPT_PATH],
                 "init_creates": [".cache/vegavisuals", MANIFEST_NAME],
                 "allowed_external_writes": [],
+                "path_policies": [
+                    {
+                        "path": ".cache/vegavisuals",
+                        "type": "directory",
+                        "role": "render-cache-and-publication-recovery",
+                        "git": "ignored",
+                        "cleanup": "explicit",
+                    },
+                    {
+                        "path": MANIFEST_NAME,
+                        "type": "file",
+                        "role": "visualization-source-manifest",
+                        "git": "versioned",
+                        "cleanup": "never",
+                    },
+                    {
+                        "path": LOCK_NAME,
+                        "type": "file",
+                        "role": "managed-output-provenance",
+                        "git": "consumer",
+                        "cleanup": "explicit",
+                    },
+                    {
+                        "path": RECEIPT_PATH,
+                        "type": "file",
+                        "role": "companion-freshness-receipt",
+                        "git": "consumer",
+                        "cleanup": "explicit",
+                    },
+                ],
             },
             "runtime": {
                 "kind": "python",
