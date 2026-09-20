@@ -20,6 +20,27 @@ workspace_rule:
     - .cache/vegavisuals
     - .vegavisuals.yml
   allowed_external_writes: []
+  path_policies:
+    - path: .cache/vegavisuals
+      type: directory
+      role: render-cache-and-publication-recovery
+      git: ignored
+      cleanup: explicit
+    - path: .vegavisuals.yml
+      type: file
+      role: visualization-source-manifest
+      git: versioned
+      cleanup: never
+    - path: .vegavisuals.lock.json
+      type: file
+      role: managed-output-provenance
+      git: consumer
+      cleanup: explicit
+    - path: .unaltraweb/receipts/vegavisuals.json
+      type: file
+      role: companion-freshness-receipt
+      git: consumer
+      cleanup: explicit
 runtime:
   kind: python
   package_manager: pip

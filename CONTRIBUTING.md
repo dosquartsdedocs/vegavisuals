@@ -27,6 +27,29 @@ make docker-smoke
 Use `make mcp-smoke` when changing the MCP adapter or factory contract. Do not
 treat a Docker-unavailable skip as release validation.
 
+For workspace path contract changes, also run the integration cases against an
+explicitly selected checkout of the central manager with `path_policies` support:
+
+```bash
+VEGAVISUALS_FACTORY_MANAGER=/absolute/path/to/my-scripts-factory/src/bash/mcp_factories/mcp-factory-manager.py make tests
+python3 /absolute/path/to/my-scripts-factory/src/bash/mcp_factories/mcp-factory-manager.py \
+  validate --dir /absolute/path/to/factories --factory vegavisuals --json
+```
+
+`tests/test_workspace_policies.py` always checks manifest parity, actual Git
+ignore/index behavior, initialization, lock/receipt lifecycles, recovery archives,
+and container-only `down`. With `VEGAVISUALS_FACTORY_MANAGER` set it also runs the
+real manager against temporary Git consumers and the current factory manifest.
+It covers direct/ancestor ignore rules, absent/tracked/untracked/ignored paths,
+and rejects force-added cache content. Provider-command sentinels must remain
+untouched. HEAD, index bytes and metadata, status, worktree registry, and consumer
+file bytes/metadata must match before and after every `workspace-check`, including
+failing checks. Without the variable only the external-manager integration cases
+are skipped; no sibling checkout is required by the ordinary host suite.
+
+Keep these tests compatible with Python 3.10 through 3.14, the declared host
+versions. Do not copy or modify the central manager to make an integration pass.
+
 ## Generated Files
 
 Do not commit caches, virtual environments, `dist/`, or `.tmp/`. The committed

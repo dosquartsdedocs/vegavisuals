@@ -57,6 +57,11 @@ preserves an existing manifest unless `vegavisuals init --force` is requested.
 Build, factory check, and smoke preparation do not require a consumer project;
 initialization, serving, rendering, and project cleanup always require one.
 
+In a Git consumer, cover `.cache/vegavisuals/` with an ignore rule and add the
+created `.vegavisuals.yml` to the index after reviewing it. Initialization does
+not edit `.gitignore` or stage files. See [Workspace Path Policies](#workspace-path-policies)
+for the read-only workspace contract and the consumer-owned Git choices.
+
 The two repository examples cover a Vega-Lite bar chart with project-local CSV
 and a raw Vega chart:
 
@@ -328,6 +333,69 @@ operations. `down` removes containers carrying both the factory and selected
 workspace labels. The maintainer-only `down-all` CLI/Make operation remains an
 explicit emergency command and is deliberately excluded from discovery lifecycle
 commands so one IDE session cannot stop another.
+
+## Workspace Path Policies
+
+Checkout, packaged, and dynamic factory manifests share the following literal
+`workspace_rule.path_policies`, retaining `schema_version: 1`, `binding: consumer`,
+and `consumer_root: .`:
+
+| Path | Type | Role | Git | Cleanup |
+| --- | --- | --- | --- | --- |
+| `.cache/vegavisuals` | directory | `render-cache-and-publication-recovery` | `ignored` | `explicit` |
+| `.vegavisuals.yml` | file | `visualization-source-manifest` | `versioned` | `never` |
+| `.vegavisuals.lock.json` | file | `managed-output-provenance` | `consumer` | `explicit` |
+| `.unaltraweb/receipts/vegavisuals.json` | file | `companion-freshness-receipt` | `consumer` | `explicit` |
+
+- **Cache and recovery:** this checkout's `.gitignore` covers the directory via
+  `.cache/`, and none of its contents are tracked. Consumers must likewise ignore
+  it, directly or through an ancestor rule. Inline render artifacts and metadata
+  can be rebuilt, but the directory also holds the publication lock and
+  `replaced/` recovery archives. Archives can contain late user edits through
+  displaced file descriptors, so the whole directory is **not disposable**.
+  Stop active operations and inspect recovery data before explicit cleanup.
+  The checkout's MCP environments also live here; they are factory-local tooling.
+- **Source manifest:** the existing project contract is versioned source, as
+  demonstrated by this checkout's tracked `.vegavisuals.yml`. Keep it in the
+  consumer index when present and never treat it as cleanup data. `init` creates
+  or preserves it without staging it; a newly created, untracked manifest needs
+  an explicit consumer `git add`. An absent default manifest is allowed by the
+  path policy (direct rendering and custom `--manifest` paths remain supported).
+  This is a Git workspace requirement, not a new prerequisite for the Git-free
+  rendering API.
+- **Output provenance lock:** the renderer publishes it with managed outputs;
+  losing it makes existing outputs unmanaged and requires replacement
+  confirmation. This checkout versions it with the example SVG fixtures, but
+  that fixture choice is not a universal consumer Git requirement. Consumers
+  decide whether to version or ignore their lock, retaining it alongside outputs
+  whose management history they need. Cleanup therefore remains explicit.
+- **Companion receipt:** a successful `check` publishes it and a failed check
+  invalidates the previous receipt. It is provider-written freshness evidence,
+  not authored source. This checkout ignores the exact file; initialization does
+  not impose that ignore rule on consumers. Its Git lifecycle stays consumer-managed,
+  and explicit removal requires a subsequent successful check to restore the
+  evidence needed by companion workflows. `consumer` does not transfer receipt
+  content ownership or change its existing publication/invalidation behavior.
+
+`ignored` requires a matching Git ignore rule and no tracked content, including
+force-added files beneath an ignored directory. `versioned` requires an existing
+path to be non-ignored and present in the index; absence is allowed. `consumer`
+reports Git state without imposing a tracking choice. Path type and confinement
+checks still apply to every entry. `cleanup` is descriptive metadata, **never
+authorization to delete**. Neither manager `workspace-check` nor provider `down`
+removes consumer paths; `down` only removes matching labelled containers.
+
+`generated_paths` describes origins, not ignore or cleanup policy. Dynamic
+sources, inputs, and outputs remain governed by `.vegavisuals.yml` and the render
+publication contract. Their paths vary by project, as do direct-render output
+arguments and custom manifest paths, so they are outside this first literal-path
+adoption. No output glob, placeholder, example-specific `examples/rendered/`,
+or assumed `dist/` destination is declared. Individual content-addressed cache
+files and recovery names are covered by their literal parent directory.
+
+The central factory manager's `workspace-check` only reads factory metadata and
+consumer filesystem/Git state; it does not run provider commands. This differs
+from `vegavisuals check`, which checks visualization freshness and writes a receipt.
 
 ## Verification
 
