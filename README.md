@@ -327,7 +327,7 @@ upgrade.
 separate package-native manifest that invokes the installed CLI directly and
 provides `tests`, `smoke`, and project-scoped `down` without Make or checkout paths. Dynamic
 metadata from `vegavisuals factory-manifest` uses the active Python interpreter
-while preserving the same lifecycle contract. ContExt checkout commands omit
+while preserving the same lifecycle contract. gContExt checkout commands omit
 `${workspaceFolder}` for factory-only operations and pass it only to project
 operations. `down` removes containers carrying both the factory and selected
 workspace labels. The maintainer-only `down-all` CLI/Make operation remains an
