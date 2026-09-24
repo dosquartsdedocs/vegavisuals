@@ -59,6 +59,7 @@ include = [
   "/SECURITY.md",
   "/THIRD_PARTY_NOTICES.md",
   "/examples",
+  "/docs",
   "/mcp-factory.yml",
   "/pyproject.toml",
   "/src",

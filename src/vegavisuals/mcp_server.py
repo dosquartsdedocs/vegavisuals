@@ -165,6 +165,26 @@ def create_server(registry: Registry, fastmcp_class: Any | None = None) -> Any:
         )
 
     @mcp.tool()
+    def export_visualization_bundle(
+        output_path: str,
+        bundle_path: str,
+        visualization_text: str = "",
+        manifest_path: str = "",
+        edited_output_path: str = "",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Opt in to a sealed v1 bundle of one fresh output; inline renders require their exact text."""
+        return _safe(lambda: registry.export_visualization_bundle(
+            output_path, bundle_path, visualization_text=visualization_text or None, manifest_path=manifest_path or None,
+            edited_output_path=edited_output_path or None, dry_run=dry_run,
+        ))
+
+    @mcp.tool()
+    def check_visualization_bundle(bundle_path: str, sha256: str) -> dict[str, Any]:
+        """Read-only verification of a retained bundle, its hashes and Vega/local-data references."""
+        return _safe(lambda: registry.check_visualization_bundle(bundle_path, sha256))
+
+    @mcp.tool()
     def visualization_status(manifest_path: str = MANIFEST_NAME) -> dict[str, Any]:
         """Report fresh, stale, missing, modified, and unmanaged manifest outputs."""
         return _safe(lambda: registry.visualization_status(manifest_path))

@@ -80,7 +80,7 @@ Every render uses a fixed worker entrypoint in the image. The host registry:
 - Serializes final commits with a project file lock, conditionally exchanges exact file snapshots with `renameat2`, and rolls output back if lock publication fails.
 - Atomically moves every retired publication inode under the mode-`0700` `.cache/vegavisuals/replaced/` directory, so late writes through an already-open descriptor remain recoverable until explicit cache cleanup.
 - Rejects HTTP/HTTPS data, image, hyperlink, and dynamic URL dependencies.
-- Resolves local data relative to the source file and fingerprints every dependency.
+- Resolves local data relative to the consumer root and fingerprints every dependency.
 - Never mounts the consumer project into the renderer.
 - Mounts only a prepared spec and staged output in an isolated host temporary directory at `/output:rw`.
 - Runs Docker with `--network none`, `--read-only`, all capabilities dropped, `no-new-privileges`, a non-root UID/GID, CPU/memory/PID/file limits, and a bounded tmpfs. Root callers use `65534:65534`.
@@ -179,6 +179,28 @@ per-visualization `invalid` state.
 
 ## CLI
 
+### Optional artifact bundles
+
+After rendering, opt in to a complete portable bundle for one fresh managed
+output:
+
+```bash
+vegavisuals --project /path/to/consumer export-bundle \
+  public/summary.svg provenance/summary-v1
+vegavisuals --project /path/to/consumer check-bundle \
+  provenance/summary-v1/bundle.json --sha256 HASH_RETURNED_BY_EXPORT
+```
+
+The bundle retains exact sources (including inline text), local data, effective
+options, theme/profile resources, renderer provenance, outputs and selected
+author edits. Native locks and receipts retain their original semantics. The
+first export prepares ignored private staging; the completed bundle is durable
+and never automatically cleaned. See [artifact handoff v1](docs/artifact-handoff-v1.md)
+for CLI/MCP arguments, verification, relocation and recovery, and the
+[0.4.0 release/pin handoff](docs/release-handoff-v0.4.0.md) for adoption gates.
+
+### Commands
+
 JSON-producing operational commands return structured JSON. Their errors also
 return JSON and a nonzero status. Help and `--version` use normal CLI text, and
 `mcp serve` speaks the MCP stdio transport rather than JSON command output.
@@ -199,6 +221,8 @@ vegavisuals [--project ROOT] update [--dry-run]
 vegavisuals [--project ROOT] validate SOURCE [--engine auto|vega-lite|vega] [--input PATH]
 vegavisuals [--project ROOT] render SOURCE OUTPUT [--format svg|png|pdf] [--name NAME]
 vegavisuals [--project ROOT] render-text [--text JSON] [--output PATH]
+vegavisuals [--project ROOT] export-bundle OUTPUT BUNDLE_DIR [--text JSON] [--manifest PATH] [--edited-output PATH] [--dry-run]
+vegavisuals [--project ROOT] check-bundle BUNDLE_MANIFEST --sha256 HASH
 vegavisuals [--project ROOT] status [--manifest .vegavisuals.yml]
 vegavisuals [--project ROOT] check [--manifest .vegavisuals.yml]
 vegavisuals [--project ROOT] render-all [--manifest .vegavisuals.yml]
@@ -239,6 +263,8 @@ registry = Registry("/path/to/consumer")
 registry.validate_visualization("charts/chart.vl.json")
 registry.render_visualization("charts/chart.vl.json", "public/chart.svg")
 registry.render_visualization_text(spec_json, output_format="png")
+bundle = registry.export_visualization_bundle("public/chart.svg", "provenance/chart-v1")
+registry.check_visualization_bundle(bundle["path"], bundle["sha256"])
 registry.visualization_status()
 registry.visualization_check()
 registry.render_visualizations()
@@ -272,6 +298,8 @@ initialize_project
 validate_visualization
 render_visualization
 render_visualization_text
+export_visualization_bundle
+check_visualization_bundle
 visualization_status
 visualization_check
 render_visualizations

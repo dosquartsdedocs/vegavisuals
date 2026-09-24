@@ -1439,23 +1439,25 @@ class LockAndManifestTest(TemporaryProject):
         from vegavisuals import registry as registry_module
 
         real_commit = registry_module._ProjectPublication.commit
+        lock_before = (self.root / LOCK_NAME).read_bytes()
         with (self.root / "chart.svg").open("r+b") as original:
-            def edit_before_commit(publication):  # type: ignore[no-untyped-def]
+            def edit_before_commit(publication, **kwargs):  # type: ignore[no-untyped-def]
                 if publication.target == "chart.svg":
                     original.seek(0)
                     original.truncate()
                     original.write(b"concurrent edit")
                     original.flush()
                     os.fsync(original.fileno())
-                return real_commit(publication)
+                return real_commit(publication, **kwargs)
 
             with patch.object(registry_module._ProjectPublication, "commit", edit_before_commit):
-                with self.assertRaisesRegex(RenderError, "preserved a concurrently changed original"):
+                with self.assertRaisesRegex(RenderError, "changed backup"):
                     self.registry.render_visualization("chart.vl.json", "chart.svg")
 
         preserved = list(self.root.glob(".chart.svg.*.tmp"))
         self.assertEqual(len(preserved), 1)
         self.assertEqual(preserved[0].read_bytes(), b"concurrent edit")
+        self.assertEqual((self.root / LOCK_NAME).read_bytes(), lock_before)
         lock = self.registry._load_lock()
         entry = next(iter(lock["visualizations"].values()))
         self.assertEqual(self.registry._project_file_hash("chart.svg")[0], entry["output_sha256"])
@@ -1468,8 +1470,8 @@ class LockAndManifestTest(TemporaryProject):
 
         real_archive = registry_module.Registry._archive_publication_file
         with (self.root / "chart.svg").open("r+b") as original:
-            def edit_after_archive(instance, source_fd, source_name, expected):  # type: ignore[no-untyped-def]
-                archived = real_archive(instance, source_fd, source_name, expected)
+            def edit_after_archive(instance, source_fd, source_name, expected, **kwargs):  # type: ignore[no-untyped-def]
+                archived = real_archive(instance, source_fd, source_name, expected, **kwargs)
                 if source_name.startswith(".chart.svg.") and source_name.endswith(".tmp"):
                     original.seek(0)
                     original.truncate()

@@ -106,6 +106,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_contract_options(render_text)
     _add_render_policy_options(render_text)
 
+    export_bundle = commands.add_parser("export-bundle", help="Seal one fresh managed output as an artifact handoff v1 bundle")
+    export_bundle.add_argument("output", help="Existing managed output or inline cache artifact")
+    export_bundle.add_argument("bundle", help="New durable workspace-relative bundle directory")
+    export_bundle.add_argument("--text", help="Exact original inline specification; '-' reads bounded stdin")
+    export_bundle.add_argument("--manifest", help="Original manifest (default: discover .vegavisuals.yml)")
+    export_bundle.add_argument("--edited-output", help="Explicit author-owned variant to retain alongside the original")
+    export_bundle.add_argument("--dry-run", action="store_true")
+    check_bundle = commands.add_parser("check-bundle", help="Verify a retained vegavisuals bundle and its local references")
+    check_bundle.add_argument("bundle", help="Workspace-relative path to bundle.json")
+    check_bundle.add_argument("--sha256", required=True, help="Exact manifest hash returned by the producer")
+
     status = commands.add_parser("status", help="Report manifest and lock freshness")
     status.add_argument("--manifest", default=MANIFEST_NAME)
     check = commands.add_parser("check", help="Require all manifest outputs to be fresh and managed")
@@ -334,6 +345,19 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
         )
     if args.command == "status":
         return _result(registry.visualization_status(args.manifest))
+    if args.command == "export-bundle":
+        text = args.text
+        if text == "-":
+            raw = sys.stdin.buffer.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValidationError("inline specification exceeds 1 MiB")
+            text = raw.decode("utf-8")
+        return _result(registry.export_visualization_bundle(
+            args.output, args.bundle, visualization_text=text, manifest_path=args.manifest,
+            edited_output_path=args.edited_output, dry_run=args.dry_run,
+        ))
+    if args.command == "check-bundle":
+        return _result(registry.check_visualization_bundle(args.bundle, args.sha256))
     if args.command == "check":
         return _result(registry.visualization_check(args.manifest))
     if args.command == "render-all":
