@@ -27,6 +27,19 @@ make docker-smoke
 Use `make mcp-smoke` when changing the MCP adapter or factory contract. Do not
 treat a Docker-unavailable skip as release validation.
 
+For artifact handoff changes, run the independent reference cases as well:
+
+```bash
+VEGAVISUALS_HANDOFF_REFERENCE=/absolute/path/to/my-scripts-factory make tests
+```
+
+These tests extract the reviewed `9167e3efb5968a64bb9100792163a179c1491860`
+schema/verifier/fixture Git blobs into temporary consumers. They never execute
+the sibling's mutable working-tree verifier. The ordinary host suite mocks
+Docker and has no sibling runtime dependency. Real Docker and installed-wheel
+MCP smoke tests cover both engines, inline export and retained-data relocation.
+See [the release/pin handoff](docs/release-handoff-v0.4.0.md).
+
 For workspace path contract changes, also run the integration cases against an
 explicitly selected checkout of the central manager with `path_policies` support:
 

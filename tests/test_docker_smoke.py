@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import pathlib
 import shutil
@@ -43,6 +44,61 @@ def docker_available() -> bool:
 
 @unittest.skipUnless(docker_available(), "set VEGAVISUALS_DOCKER_SMOKE=1 with a reachable Docker daemon")
 class DockerSmokeTest(unittest.TestCase):
+    def test_bundle_relocation_and_rerender_without_producer_job(self) -> None:
+        from vegavisuals.handoff import digest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            producer = base / "producer"
+            producer.mkdir()
+            registry = Registry(producer)
+            shutil.copytree(REPO_ROOT / "examples", producer / "examples")
+            # Exercise actual local data loading in raw Vega as well as Vega-Lite.
+            raw_source = producer / "examples/vega/raw.vg.json"
+            raw = json.loads(raw_source.read_bytes())
+            for index, data in enumerate(raw.get("data", [])):
+                if "values" in data:
+                    path = f"examples/vega/data-{index}.json"
+                    (producer / path).write_text(json.dumps(data.pop("values")), encoding="utf-8")
+                    data["url"] = path
+            raw_source.write_text(json.dumps(raw), encoding="utf-8")
+            results = []
+            try:
+                for engine, source in (("vega-lite", "examples/vega-lite/bar.vl.json"), ("vega", "examples/vega/raw.vg.json")):
+                    output = f"out/{engine}.svg"
+                    registry.render_visualization(source, output)
+                    result = registry.export_visualization_bundle(output, f"bundles/{engine}")
+                    self.assertTrue(result["ok"], result)
+                    results.append((engine, source, result))
+                registry.down()
+            finally:
+                registry.close()
+            final = base / "final"
+            shutil.copytree(producer / "bundles", final / "retained")
+            shutil.rmtree(producer)
+            moved = base / "relocated"
+            final.rename(moved)
+            registry = Registry(moved)
+            try:
+                for engine, source, result in results:
+                    path = f"retained/{engine}/bundle.json"
+                    checked = registry.check_visualization_bundle(path, result["sha256"])
+                    self.assertTrue(checked["ok"], checked)
+                    retained = moved / "retained" / engine
+                    # Re-render a working copy; sealed archives remain byte-identical.
+                    project = moved / f"rerender-{engine}"
+                    shutil.copytree(retained / "payload/project", project)
+                    rendering = Registry(project)
+                    try:
+                        rendering.render_visualization(source, "rerendered.svg")
+                        self.assertEqual((project / "rerendered.svg").read_bytes(),
+                                         (retained / "payload/output/visualization.svg").read_bytes())
+                    finally:
+                        rendering.close()
+                    self.assertEqual(digest((moved / path).read_bytes()), result["sha256"])
+            finally:
+                registry.close()
+
     def test_down_removes_only_the_selected_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = pathlib.Path(temporary)

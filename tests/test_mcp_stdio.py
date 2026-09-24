@@ -79,6 +79,8 @@ class MCPStdioSmokeTest(unittest.TestCase):
                         names = {tool.name for tool in tools.tools}
                         self.assertIn("render_visualization", names)
                         self.assertIn("render_visualization_text", names)
+                        self.assertIn("export_visualization_bundle", names)
+                        self.assertIn("check_visualization_bundle", names)
                         self.assertIn("visualization_status", names)
                         self.assertIn("initialize_project", names)
                         self.assertIn("factory_check", names)
@@ -112,6 +114,36 @@ class MCPStdioSmokeTest(unittest.TestCase):
                             self.assertTrue(payload["ok"], payload)
                             self.assertEqual(payload["engine"], engine)
                             self.assertTrue((project / output).is_file())
+                            exported = await session.call_tool("export_visualization_bundle", {
+                                "output_path": output, "bundle_path": f"bundles/{engine}",
+                            })
+                            bundle = json.loads("\n".join(getattr(item, "text", "") for item in exported.content))
+                            self.assertFalse(exported.isError)
+                            self.assertTrue(bundle["ok"], bundle)
+                            checked = await session.call_tool("check_visualization_bundle", {
+                                "bundle_path": bundle["path"], "sha256": bundle["sha256"],
+                            })
+                            checked_payload = json.loads("\n".join(getattr(item, "text", "") for item in checked.content))
+                            self.assertTrue(checked_payload["ok"], checked_payload)
+
+                        for engine, spec in (("vega-lite", {"data": {"values": [{"x": 1}]}, "mark": "point"}),
+                                             ("vega", {"marks": [{"type": "rect"}]})):
+                            text = json.dumps(spec) + "\n"
+                            rendered = await session.call_tool("render_visualization_text", {
+                                "visualization_text": text, "engine": engine,
+                            })
+                            payload = json.loads("\n".join(getattr(item, "text", "") for item in rendered.content))
+                            self.assertTrue(payload["ok"], payload)
+                            exported = await session.call_tool("export_visualization_bundle", {
+                                "output_path": payload["artifact"]["path"], "bundle_path": f"bundles/inline-{engine}",
+                                "visualization_text": text,
+                            })
+                            self.assertFalse(exported.isError, exported.content)
+                            bundle = json.loads("\n".join(getattr(item, "text", "") for item in exported.content))
+                            self.assertTrue(bundle["ok"], bundle)
+                            retained = project / bundle["path"]
+                            request = json.loads((retained.parent / "payload/request.json").read_bytes())
+                            self.assertEqual((retained.parent / "payload/project" / request["source"]).read_text(), text)
 
                         blocked = await session.call_tool(
                             "validate_visualization",

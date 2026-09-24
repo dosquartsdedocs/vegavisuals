@@ -109,6 +109,8 @@ MCP_TOOL_NAMES = (
     "validate_visualization",
     "render_visualization",
     "render_visualization_text",
+    "export_visualization_bundle",
+    "check_visualization_bundle",
     "visualization_status",
     "visualization_check",
     "render_visualizations",
@@ -607,6 +609,7 @@ class Registry:
 
     def __init__(self, project_root: str | pathlib.Path = ".", *, runner: Runner | None = None) -> None:
         root = pathlib.Path(project_root).expanduser()
+        self._startup_project_root = pathlib.Path(os.path.abspath(root))
         try:
             self.project_root = root.resolve(strict=True)
         except OSError as exc:
@@ -2658,35 +2661,16 @@ class Registry:
             raise ManifestError(f"{description} exceeds {max_bytes} bytes")
         return data
 
-    def _publish_artifact_and_lock(
-        self,
-        output_relative: str,
-        artifact_data: bytes,
-        lock: dict[str, Any],
-        *,
-        expected_output: _FileSnapshot,
-        expected_lock: _FileSnapshot,
-        verify_inputs: Callable[[], None] | None = None,
-    ) -> None:
+    @contextmanager
+    def _publication_transaction(
+        self, transaction_log: list[_ProjectPublication] | None = None,
+    ) -> Iterable[list[_ProjectPublication]]:
+        if transaction_log is not None:
+            yield transaction_log
+            return
         publications: list[_ProjectPublication] = []
         try:
-            if verify_inputs is not None:
-                verify_inputs()
-            self._require_recovery_filesystem(output_relative)
-            self._replace_project_bytes(
-                output_relative,
-                artifact_data,
-                expected=expected_output,
-                transaction_log=publications,
-            )
-            self._replace_project_bytes(
-                LOCK_NAME,
-                self._lock_bytes(lock),
-                expected=expected_lock,
-                transaction_log=publications,
-            )
-            if verify_inputs is not None:
-                verify_inputs()
+            yield publications
         except BaseException as publication_error:
             rollback_error: BaseException | None = None
             for publication in reversed(publications):
@@ -2706,43 +2690,58 @@ class Registry:
         if commit_error is not None:
             raise commit_error
 
+    def _publish_artifact_and_lock(
+        self,
+        output_relative: str,
+        artifact_data: bytes,
+        lock: dict[str, Any],
+        *,
+        expected_output: _FileSnapshot,
+        expected_lock: _FileSnapshot,
+        verify_inputs: Callable[[], None] | None = None,
+        transaction_log: list[_ProjectPublication] | None = None,
+    ) -> None:
+        with self._publication_transaction(transaction_log) as publications:
+            if verify_inputs is not None:
+                verify_inputs()
+            self._require_recovery_filesystem(output_relative)
+            self._replace_project_bytes(
+                output_relative,
+                artifact_data,
+                expected=expected_output,
+                transaction_log=publications,
+            )
+            self._replace_project_bytes(
+                LOCK_NAME,
+                self._lock_bytes(lock),
+                expected=expected_lock,
+                transaction_log=publications,
+            )
+            if verify_inputs is not None:
+                verify_inputs()
+
     def _publish_cache_pair(
         self,
         cache_relative: str,
         artifact_data: bytes,
         metadata_relative: str,
         metadata: dict[str, Any],
+        *,
+        transaction_log: list[_ProjectPublication] | None = None,
     ) -> None:
-        publications: list[_ProjectPublication] = []
-        try:
+        with self._publication_transaction(transaction_log) as publications:
             self._replace_project_bytes(
                 cache_relative,
                 artifact_data,
+                expected=self._project_file_snapshot(cache_relative),
                 transaction_log=publications,
             )
             self._replace_project_bytes(
                 metadata_relative,
                 self._lock_bytes(metadata, max_bytes=65536, description="inline cache metadata"),
+                expected=self._project_file_snapshot(metadata_relative),
                 transaction_log=publications,
             )
-        except BaseException as publication_error:
-            rollback_error: BaseException | None = None
-            for publication in reversed(publications):
-                try:
-                    publication.rollback()
-                except BaseException as exc:
-                    rollback_error = rollback_error or exc
-            if rollback_error is not None:
-                raise rollback_error from publication_error
-            raise
-        commit_error: BaseException | None = None
-        for publication in reversed(publications):
-            try:
-                publication.commit()
-            except BaseException as exc:
-                commit_error = commit_error or exc
-        if commit_error is not None:
-            raise commit_error
 
     def _lock_key(
         self,
@@ -3064,6 +3063,31 @@ class Registry:
             "artifact": artifact,
         }
 
+    def export_visualization_bundle(
+        self,
+        output_path: str,
+        bundle_path: str,
+        *,
+        visualization_text: str | None = None,
+        manifest_path: str | None = None,
+        edited_output_path: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Seal one fresh managed visualization, retaining complete portable inputs."""
+        from .handoff import export
+
+        try:
+            return export(self, output_path, bundle_path, visualization_text=visualization_text,
+                          manifest_path=manifest_path, edited_output_path=edited_output_path, dry_run=dry_run)
+        except (KeyError, TypeError, AttributeError, IndexError, UnicodeError) as exc:
+            raise ValidationError("artifact handoff: malformed native render metadata or export arguments") from exc
+
+    def check_visualization_bundle(self, bundle_path: str, sha256: str) -> dict[str, Any]:
+        """Read-only byte and domain verification of a retained leaf bundle."""
+        from .handoff import check
+
+        return check(self, bundle_path, sha256)
+
     def _inline_validation(
         self,
         visualization_text: str,
@@ -3235,6 +3259,10 @@ class Registry:
                 max_bytes=max_output,
                 renderer=cache_renderer,
             )
+            cache_token = (
+                self._project_file_snapshot(cache_relative, max_bytes=max_output),
+                self._project_file_snapshot(metadata_relative, max_bytes=65536),
+            )
             if explicit_relative is not None and explicit_relative != cache_relative:
                 lock = self._load_lock()
                 key = self._lock_key(lock["visualizations"], explicit_relative, None)
@@ -3315,7 +3343,7 @@ class Registry:
             )
             rendered_data = execution.pop("_artifact_data")
 
-        with self._project_lock():
+        with self._project_lock(), self._publication_transaction() as publications:
             cached_now = self._cache_is_valid(
                 cache_relative,
                 metadata_relative,
@@ -3325,6 +3353,11 @@ class Registry:
                 renderer=cache_renderer,
             )
             if rendered_data is not None and (force or not cached_now):
+                if cache_token != (
+                    self._project_file_snapshot(cache_relative, max_bytes=max_output),
+                    self._project_file_snapshot(metadata_relative, max_bytes=65536),
+                ):
+                    raise RenderError("inline cache changed while rendering; retry without overwriting it")
                 cache_hash = _sha256_bytes(rendered_data)
                 self._publish_cache_pair(
                     cache_relative,
@@ -3342,6 +3375,7 @@ class Registry:
                         "vega_lite_version": validation["vega_lite_version"],
                         "renderer": cache_renderer,
                     },
+                    transaction_log=publications,
                 )
             elif not cached_now:
                 raise RenderError("inline cache changed while rendering; retry")
@@ -3387,6 +3421,7 @@ class Registry:
                     lock,
                     expected_output=final_snapshot,
                     expected_lock=lock_snapshot,
+                    transaction_log=publications,
                 )
                 final_relative = explicit_relative
             artifact = self._artifact_payload(
@@ -4499,6 +4534,7 @@ class Registry:
                 "lock": LOCK_VERSION,
                 "inline_cache": CACHE_VERSION,
                 "receipt": 1,
+                "artifact_handoff": 1,
                 "mcp_errors": "typed-application-result",
             },
         }
