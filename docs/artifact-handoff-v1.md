@@ -40,7 +40,10 @@ directory is never merged or replaced.
 
 For inline rendering, pass the **exact original text**, including whitespace,
 back to the exporter. Both explicit managed outputs and cache-only artifacts are
-supported. CLI `--text -` reads at most 1 MiB from stdin. A digest alone cannot
+supported; both require matching native inline cache metadata and artifact bytes
+to remain available. Export retains the cache metadata alongside the native lock
+for an explicit output, and rejects missing, modified or inconsistent evidence.
+CLI `--text -` reads at most 1 MiB from stdin. A digest alone cannot
 recover an inline specification. The URL-free inline rule is unchanged.
 
 For manifest rendering, the default `.vegavisuals.yml` is discovered when it
@@ -100,6 +103,10 @@ commit. It never rewrites a native output, lock or receipt. Inline rendering now
 coordinates cache artifact, cache metadata, explicit output and lock as one
 rollback transaction. Concurrent changes are rejected; displaced native inodes
 remain in the existing `replaced/` recovery archive.
+The original cache snapshots are passed through the final conditional exchanges.
+Commit retains rollback handles for every publication until all backup archives
+and fsyncs succeed. A failure aborts the commit loop and rolls back the entire
+group, including originals already moved into the recovery archive.
 
 The first real export prepares mode-0700 `.cache/vegavisuals/handoff/`. In a Git
 consumer it verifies that the cache contains no tracked files and has effective
@@ -110,6 +117,10 @@ choices alone. No new literal `path_policies` entry is needed: the work area is
 covered by the existing cache/recovery policy. Bundle destinations are chosen by
 the caller outside `.cache` and `.unaltraweb`; retain and review them as durable
 provenance with the sources.
+Git inspection uses the same inherited startup directory descriptor as staging
+and `.gitignore` publication. Root identity is rechecked around Git operations
+and mutations; a renamed/replaced root aborts without inspecting or modifying
+the replacement tree.
 
 The private candidate is fully sealed, fsynced and domain-checked, then published
 with descriptor-relative `renameat2(RENAME_NOREPLACE)` on the same filesystem.

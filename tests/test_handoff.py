@@ -106,6 +106,10 @@ class HandoffTest(unittest.TestCase):
                     bundle = (self.root / result["path"]).parent
                     request = json.loads((bundle / "payload/request.json").read_bytes())
                     self.assertEqual((bundle / "payload/project" / request["source"]).read_bytes(), text.encode())
+                    metadata = self.root / rendered["cache"].rsplit(".", 1)[0]
+                    self.assertEqual((bundle / "payload/evidence/native-cache.json").read_bytes(),
+                                     metadata.with_suffix(".json").read_bytes())
+                    self.assertEqual((bundle / "payload/evidence/native-lock.json").exists(), explicit)
                     self.assertEqual(json.loads((bundle / "bundle.json").read_bytes())["dependencies"], [])
                     with self.assertRaisesRegex(ValidationError, "original specification"):
                         self.registry.export_visualization_bundle(output, "missing-text")
@@ -120,6 +124,25 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
         doc = json.loads((self.root / result["path"]).read_bytes())
         self.assertEqual(doc["producer"]["runtimes"][0]["revision"], "sha256:" + "1" * 64)
+
+    def test_explicit_inline_export_rejects_missing_or_modified_cache_evidence(self):
+        text = vl_spec()
+        rendered = self.registry.render_visualization_text(text, output_path="out/inline.svg")
+        metadata = self.root / (rendered["cache"].rsplit(".", 1)[0] + ".json")
+        original = metadata.read_bytes()
+        lock_before = (self.root / LOCK_NAME).read_bytes()
+        for raw in (None, b"invalid JSON", original.replace(b'"version": 2', b'"version": 99'),
+                    original.replace(b'"engine": "vega-lite"', b'"engine": "vega"')):
+            with self.subTest(raw=raw):
+                if raw is None:
+                    metadata.unlink()
+                else:
+                    metadata.write_bytes(raw)
+                with self.assertRaises((OSError, ValidationError)):
+                    self.registry.export_visualization_bundle("out/inline.svg", "bundle", visualization_text=text)
+                self.assertFalse((self.root / "bundle").exists())
+                self.assertEqual((self.root / LOCK_NAME).read_bytes(), lock_before)
+                metadata.write_bytes(original)
 
     def test_explicit_author_variant_retains_original(self):
         _, output = self.render()
@@ -349,6 +372,74 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(cache.read_bytes(), b"concurrent cache edit")
         self.assertEqual((self.root / LOCK_NAME).read_bytes(), before)
 
+    def test_inline_cache_snapshot_is_not_recaptured_at_publication(self):
+        rendered = self.registry.render_visualization_text(vl_spec(), output_path="output.svg")
+        cache = self.root / rendered["cache"]
+        metadata = cache.with_suffix(".json")
+        before = {path: path.read_bytes() for path in (cache, metadata, self.root / "output.svg", self.root / LOCK_NAME)}
+        original = self.registry._publish_cache_pair
+        for target in (cache, metadata):
+            def late_edit(*args, **kwargs):
+                target.write_bytes(b"edit after cache-token comparison")
+                return original(*args, **kwargs)
+            with self.subTest(target=target), patch.object(self.registry, "_publish_cache_pair", side_effect=late_edit):
+                with self.assertRaises(RenderError):
+                    self.registry.render_visualization_text(vl_spec(), output_path="output.svg", force=True)
+            self.assertEqual(target.read_bytes(), b"edit after cache-token comparison")
+            for path, raw in before.items():
+                if path != target:
+                    self.assertEqual(path.read_bytes(), raw)
+            target.write_bytes(before[target])
+
+    def test_inline_commit_failures_roll_back_already_archived_originals(self):
+        import vegavisuals.registry as module
+        self.registry.render_visualization_text(vl_spec(), output_path="output.svg")
+        def managed():
+            return {path.relative_to(self.root).as_posix(): path.read_bytes()
+                    for path in self.root.rglob("*") if path.is_file() and "replaced" not in path.parts}
+        before = managed()
+        original = module._ProjectPublication.commit
+        for boundary in ("cache", "metadata", "output", "lock"):
+            for after_archive in (False, True):
+                calls = []
+                handles = []
+                def fail(publication, **kwargs):
+                    target = publication.target
+                    kind = "lock" if target == LOCK_NAME else "output" if target == "output.svg" else "metadata" if target.endswith(".json") else "cache"
+                    calls.append(kind)
+                    handles.append(publication)
+                    if kind == boundary and not after_archive:
+                        raise OSError("commit boundary failure")
+                    original(publication, **kwargs)
+                    if kind == boundary:
+                        raise KeyboardInterrupt()
+                with self.subTest(boundary=boundary, after_archive=after_archive):
+                    with patch.object(module._ProjectPublication, "commit", fail), self.assertRaises((OSError, KeyboardInterrupt)):
+                        self.registry.render_visualization_text(vl_spec(value=8), output_path="output.svg")
+                    self.assertEqual(managed(), before)
+                    self.assertEqual(calls[-1], boundary)
+                    self.assertTrue(all(handle.closed for handle in handles))
+
+    def test_archive_rename_failure_recovers_even_after_the_move(self):
+        import vegavisuals.registry as module
+        self.registry.render_visualization_text(vl_spec(), output_path="output.svg")
+        before = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                  for path in self.root.rglob("*") if path.is_file()}
+        original = module._renameat2
+        failed = False
+        def interrupt_after_move(source_fd, source, target_fd, target, flags):
+            nonlocal failed
+            original(source_fd, source, target_fd, target, flags)
+            if target.endswith(".replaced") and not failed:
+                failed = True
+                raise KeyboardInterrupt()
+        with patch.object(module, "_renameat2", side_effect=interrupt_after_move), self.assertRaises(KeyboardInterrupt):
+            self.registry.render_visualization_text(vl_spec(value=8), output_path="output.svg")
+        self.assertTrue(failed)
+        after = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                 for path in self.root.rglob("*") if path.is_file() and "replaced" not in path.parts}
+        self.assertEqual(after, before)
+
     def test_bundle_publication_race_never_replaces_destination(self):
         _, output = self.render()
         import vegavisuals.registry as module
@@ -445,6 +536,49 @@ class HandoffTest(unittest.TestCase):
                 self.registry.export_visualization_bundle(output, target, visualization_text=text)
         with patch("vegavisuals.handoff.shutil.which", return_value=None):
             self.export(output, visualization_text=text)
+
+    def test_git_inspection_uses_the_pinned_root_when_path_is_replaced(self):
+        import vegavisuals.handoff as handoff
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        write(self.root / ".gitignore", "# original author rules\n")
+        _, output = self.render()
+        retained = self.base / "original-root"
+        original_run = subprocess.run
+        observed = []
+        def replace_root(command, **kwargs):
+            self.root.rename(retained)
+            self.root.mkdir()
+            write(self.root / ".gitignore", "# replacement author rules\n")
+            result = original_run(command, **kwargs)
+            observed.append(result.stdout.decode().strip())
+            return result
+        with patch.object(handoff.subprocess, "run", side_effect=replace_root), self.assertRaisesRegex(ValidationError, "startup root changed"):
+            self.registry.export_visualization_bundle(output, "bundle")
+        self.assertEqual(observed, [str(retained)])
+        self.assertEqual((retained / ".gitignore").read_text(), "# original author rules\n")
+        self.assertEqual((self.root / ".gitignore").read_text(), "# replacement author rules\n")
+        self.assertFalse((retained / STAGING).exists())
+        self.assertFalse((self.root / STAGING).exists())
+
+    def test_gitignore_update_rolls_back_if_root_is_replaced(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        write(self.root / ".gitignore", "# original author rules\n")
+        _, output = self.render()
+        retained = self.base / "original-root"
+        original = self.registry._replace_project_bytes
+        def replace_root(path, data, **kwargs):
+            publication = original(path, data, **kwargs)
+            if path == ".gitignore":
+                self.root.rename(retained)
+                self.root.mkdir()
+                write(self.root / ".gitignore", "# replacement author rules\n")
+            return publication
+        with patch.object(self.registry, "_replace_project_bytes", side_effect=replace_root), self.assertRaisesRegex(ValidationError, "startup root changed"):
+            self.registry.export_visualization_bundle(output, "bundle")
+        self.assertEqual((retained / ".gitignore").read_text(), "# original author rules\n")
+        self.assertEqual((self.root / ".gitignore").read_text(), "# replacement author rules\n")
+        self.assertFalse((retained / STAGING).exists())
+        self.assertFalse((self.root / STAGING).exists())
 
     def test_cli_mcp_parity_and_typed_failure(self):
         _, output = self.render()

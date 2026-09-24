@@ -453,7 +453,7 @@ class _ProjectPublication:
         installed: _FileSnapshot,
         backup_snapshot: _FileSnapshot | None,
         snapshot_reader: Callable[[int, str], _FileSnapshot],
-        archive_file: Callable[[int, str, _FileSnapshot], str],
+        archive_file: Callable[..., str],
     ) -> None:
         self.parent_fd = parent_fd
         self.target = target
@@ -462,21 +462,52 @@ class _ProjectPublication:
         self.backup_snapshot = backup_snapshot
         self.snapshot_reader = snapshot_reader
         self.archive_file = archive_file
+        self.archived_backup: tuple[int, str] | None = None
         self.closed = False
 
-    def _snapshot(self, name: str, role: str) -> _FileSnapshot:
+    def _snapshot(self, name: str, role: str, *, parent_fd: int | None = None) -> _FileSnapshot:
         try:
-            return self.snapshot_reader(self.parent_fd, name)
+            return self.snapshot_reader(self.parent_fd if parent_fd is None else parent_fd, name)
         except BaseException as exc:
             backup = f"; preserved original as {self.backup}" if self.backup is not None else ""
             raise RenderError(f"publication cannot safely read {role}{backup}") from exc
 
-    def _reverse_exchange(self, message: str) -> None:
+    def _backup_location(self) -> tuple[int, str]:
         assert self.backup is not None
+        if self.archived_backup is not None:
+            fd, name = self.archived_backup
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                expected = self.backup_snapshot
+                if expected is not None and (info.st_dev, info.st_ino) == (expected.device, expected.inode):
+                    return fd, name
+        return self.parent_fd, self.backup
+
+    def _reserve_archive(self, fd: int, name: str) -> None:
+        # Remember the destination before rename: even an exception immediately
+        # after the move must leave rollback able to find the original inode.
+        if self.archived_backup is not None:
+            os.close(self.archived_backup[0])
+        self.archived_backup = os.dup(fd), name
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            try:
+                os.close(self.parent_fd)
+            finally:
+                if self.archived_backup is not None:
+                    os.close(self.archived_backup[0])
+
+    def _reverse_exchange(self, message: str, backup_location: tuple[int, str]) -> None:
+        backup_fd, backup_name = backup_location
         try:
             _renameat2(
-                self.parent_fd,
-                self.backup,
+                backup_fd,
+                backup_name,
                 self.parent_fd,
                 self.target,
                 RENAME_EXCHANGE,
@@ -484,14 +515,15 @@ class _ProjectPublication:
         except OSError as exc:
             raise RenderError(f"{message}; preserved displaced file as {self.backup}") from exc
 
-    def _archive_transaction(self, name: str, snapshot: _FileSnapshot) -> None:
-        self.archive_file(self.parent_fd, name, snapshot)
+    def _archive_transaction(self, name: str, snapshot: _FileSnapshot, *, parent_fd: int | None = None) -> None:
+        self.archive_file(self.parent_fd if parent_fd is None else parent_fd, name, snapshot)
 
-    def commit(self) -> None:
+    def commit(self, *, defer_close: bool = False) -> None:
         if self.closed:
             return
-        commit_error: BaseException | None = None
         try:
+            if self._snapshot(self.target, "current published target") != self.installed:
+                raise RenderError("publication commit refused a concurrently edited target")
             if self.backup is not None:
                 if self.backup_snapshot is None:
                     raise RenderError(f"publication has no snapshot for preserved original {self.backup}")
@@ -500,19 +532,15 @@ class _ProjectPublication:
                     raise RenderError(
                         f"publication preserved a concurrently changed original as {self.backup}"
                     )
-                self._archive_transaction(self.backup, self.backup_snapshot)
-            try:
-                os.fsync(self.parent_fd)
-            except OSError:
-                # The replacement was already fsynced before this cleanup handle was returned.
-                pass
-        except BaseException as exc:
-            commit_error = exc
-        finally:
-            os.close(self.parent_fd)
-            self.closed = True
-        if commit_error is not None:
-            raise commit_error
+                self.archive_file(self.parent_fd, self.backup, self.backup_snapshot,
+                                  on_destination=self._reserve_archive)
+            os.fsync(self.parent_fd)
+        except BaseException:
+            if not defer_close:
+                self.rollback()
+            raise
+        if not defer_close:
+            self.close()
 
     def rollback(self) -> None:
         if self.closed:
@@ -526,16 +554,18 @@ class _ProjectPublication:
             if self.backup is not None:
                 if self.backup_snapshot is None:
                     raise RenderError(f"publication rollback has no snapshot for preserved original {self.backup}")
-                original = self._snapshot(self.backup, "preserved original")
+                backup_fd, backup_name = self._backup_location()
+                original = self._snapshot(backup_name, "preserved original", parent_fd=backup_fd)
                 if original != self.backup_snapshot:
                     raise RenderError(
                         f"publication rollback refused to overwrite a changed backup; preserved original as {self.backup}"
                     )
-                self._reverse_exchange("publication rollback could not restore the original")
+                backup_location = backup_fd, backup_name
+                self._reverse_exchange("publication rollback could not restore the original", backup_location)
                 displaced: _FileSnapshot | None = None
                 restored: _FileSnapshot | None = None
                 try:
-                    displaced = self._snapshot(self.backup, "displaced published target")
+                    displaced = self._snapshot(backup_name, "displaced published target", parent_fd=backup_fd)
                 except RenderError:
                     pass
                 try:
@@ -543,9 +573,9 @@ class _ProjectPublication:
                 except RenderError:
                     pass
                 if displaced == self.installed and restored == self.backup_snapshot:
-                    self._archive_transaction(self.backup, self.installed)
+                    self._archive_transaction(backup_name, self.installed, parent_fd=backup_fd)
                 elif restored == self.backup_snapshot:
-                    self._reverse_exchange("publication rollback could not expose a concurrent edit")
+                    self._reverse_exchange("publication rollback could not expose a concurrent edit", backup_location)
                     raise RenderError(
                         f"publication rollback detected a concurrent target change; "
                         f"preserved original as {self.backup}"
@@ -596,8 +626,7 @@ class _ProjectPublication:
         except BaseException as exc:
             rollback_error = exc
         finally:
-            os.close(self.parent_fd)
-            self.closed = True
+            self.close()
         if rollback_error is not None:
             if isinstance(rollback_error, RenderError):
                 raise rollback_error
@@ -919,6 +948,8 @@ class Registry:
         source_fd: int,
         source_name: str,
         expected: _FileSnapshot,
+        *,
+        on_destination: Callable[[int, str], None] | None = None,
     ) -> str:
         if not expected.exists or expected.sha256 is None:
             raise RenderError("cannot archive a missing publication snapshot")
@@ -928,6 +959,8 @@ class Registry:
         )
         with self._open_project_parent(relative, create=True) as (archive_fd, archive_name):
             os.fchmod(archive_fd, 0o700)
+            if on_destination is not None:
+                on_destination(archive_fd, archive_name)
             try:
                 _renameat2(
                     source_fd,
@@ -2671,6 +2704,11 @@ class Registry:
         publications: list[_ProjectPublication] = []
         try:
             yield publications
+            # Archive every original while keeping all rollback handles alive.
+            # A failure at any commit boundary rolls the whole group back, even
+            # when earlier originals have already moved into the recovery tree.
+            for publication in reversed(publications):
+                publication.commit(defer_close=True)
         except BaseException as publication_error:
             rollback_error: BaseException | None = None
             for publication in reversed(publications):
@@ -2681,14 +2719,8 @@ class Registry:
             if rollback_error is not None:
                 raise rollback_error from publication_error
             raise
-        commit_error: BaseException | None = None
         for publication in reversed(publications):
-            try:
-                publication.commit()
-            except BaseException as exc:
-                commit_error = commit_error or exc
-        if commit_error is not None:
-            raise commit_error
+            publication.close()
 
     def _publish_artifact_and_lock(
         self,
@@ -2727,19 +2759,21 @@ class Registry:
         metadata_relative: str,
         metadata: dict[str, Any],
         *,
+        expected_cache: _FileSnapshot,
+        expected_metadata: _FileSnapshot,
         transaction_log: list[_ProjectPublication] | None = None,
     ) -> None:
         with self._publication_transaction(transaction_log) as publications:
             self._replace_project_bytes(
                 cache_relative,
                 artifact_data,
-                expected=self._project_file_snapshot(cache_relative),
+                expected=expected_cache,
                 transaction_log=publications,
             )
             self._replace_project_bytes(
                 metadata_relative,
                 self._lock_bytes(metadata, max_bytes=65536, description="inline cache metadata"),
-                expected=self._project_file_snapshot(metadata_relative),
+                expected=expected_metadata,
                 transaction_log=publications,
             )
 
@@ -3375,6 +3409,8 @@ class Registry:
                         "vega_lite_version": validation["vega_lite_version"],
                         "renderer": cache_renderer,
                     },
+                    expected_cache=cache_token[0],
+                    expected_metadata=cache_token[1],
                     transaction_log=publications,
                 )
             elif not cached_now:

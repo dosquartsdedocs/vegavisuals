@@ -346,6 +346,15 @@ def _domain(registry: Registry, doc: dict[str, Any], files: dict[str, dict[str, 
             require(item["path"].endswith("." + request["format"]), "output suffix mismatch")
             registry._validate_artifact_data(contents[key], request["format"], max_bytes=MAX_FILE)
     require("output" in files and files["output"]["kind"] == "output", "missing visualization output")
+    if request["inline"]:
+        metadata = parse(content("native-cache", "evidence", "native-cache-metadata"))
+        require(type(metadata.get("version")) is int and metadata["version"] == 2,
+                "invalid retained inline cache version")
+        require(all(metadata.get(key) == request[key] for key in
+                    ("engine", "format", "profile", "family", "vega_lite_version", "fingerprint", "renderer"))
+                and metadata.get("output_sha256") == files["output"]["sha256"]
+                and metadata.get("output") == f".cache/vegavisuals/text/{request['fingerprint']}.{request['format']}",
+                "retained inline cache evidence differs from the managed render")
     if "manifest" in files:
         effective = parse(content("manifest", "input", "visualization-manifest"))
         require(effective == request["manifest"], "manifest projection mismatch")
@@ -398,20 +407,57 @@ def _producer_inventory() -> bytes:
     return encode({"algorithm": "sha256-of-exact-inventory-bytes", "package": "vegavisuals", "version": __version__, "files": files})
 
 
+def _verify_project_root(registry: Registry) -> None:
+    current = Reader(registry._startup_project_root)
+    try:
+        require(os.path.samestat(os.fstat(current.fd), os.fstat(registry._project_root_fd)), "startup root changed")
+    finally:
+        current.close()
+
+
+def _git_marker_at_root(registry: Registry) -> bool:
+    fd = os.dup(registry._project_root_fd)
+    try:
+        while True:
+            try:
+                os.stat(".git", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                return True
+            parent = os.open("..", Reader.flags, dir_fd=fd)
+            if os.path.samestat(os.fstat(parent), os.fstat(fd)):
+                os.close(parent)
+                return False
+            os.close(fd)
+            fd = parent
+    finally:
+        os.close(fd)
+
+
 def _prepare_workspace(registry: Registry) -> None:
     """Explicit export enablement: ignore private staging, preserving custom rules."""
+    _verify_project_root(registry)
+
     def git(*args):
+        _verify_project_root(registry)
         environment = {key: value for key, value in os.environ.items()
                        if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}}
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         try:
-            return subprocess.run(["git", "-C", str(registry.project_root), *args], check=False,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=environment)
+            result = subprocess.run(
+                ["git", *args], cwd=f"/proc/self/fd/{registry._project_root_fd}",
+                pass_fds=(registry._project_root_fd,), check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=environment,
+            )
         except subprocess.TimeoutExpired as exc:
             raise ValidationError("artifact handoff: Git ignore inspection timed out") from exc
+        _verify_project_root(registry)
+        return result
 
     git_available = shutil.which("git") is not None
-    git_marker = any(os.path.lexists(parent / ".git") for parent in (registry.project_root, *registry.project_root.parents))
+    git_marker = _git_marker_at_root(registry)
+    _verify_project_root(registry)
     if not git_available:
         require(not git_marker, "Git is required to prepare effective ignore coverage in a Git consumer")
     git_consumer = git_available and git("rev-parse", "--show-toplevel").returncode == 0
@@ -423,11 +469,15 @@ def _prepare_workspace(registry: Registry) -> None:
             snapshot = registry._project_file_snapshot(".gitignore", max_bytes=MAX_MANIFEST)
             raw = registry._read_project_bytes(".gitignore", max_bytes=MAX_MANIFEST, description="Git ignore rules") if snapshot.exists else b""
             raw += (b"\n" if raw and not raw.endswith(b"\n") else b"") + b"\n# vegavisuals private staging and publication recovery\n/.cache/vegavisuals/\n"
-            publication = registry._replace_project_bytes(".gitignore", raw, expected=snapshot)
-            publication.commit()
+            with registry._publication_transaction() as publications:
+                _verify_project_root(registry)
+                registry._replace_project_bytes(".gitignore", raw, expected=snapshot, transaction_log=publications)
+                _verify_project_root(registry)
         require(git("check-ignore", "-q", "--", f"{STAGING}/probe").returncode == 0, "staging is not effectively ignored")
+    _verify_project_root(registry)
     with registry._open_project_parent(f"{STAGING}/probe", create=True) as (fd, _):
         os.fchmod(fd, 0o700)
+    _verify_project_root(registry)
 
 
 def _publish(registry, target: str, payload: dict[str, bytes], source_reader: Reader, recheck) -> dict[str, Any]:
@@ -563,11 +613,20 @@ def export(registry: Registry, output_path: str, bundle_path: str, *, visualizat
             require(isinstance(renderer, dict) and isinstance(renderer.get("image_id"), str)
                     and re.fullmatch(r"sha256:[0-9a-f]{64}", renderer["image_id"]) is not None, "invalid native renderer provenance")
             require(registry._renderer_contract(validation["_profile_path"]) == renderer["renderer_contract"], "stale renderer contract")
-            if not matches:
-                require(output == f".cache/vegavisuals/text/{fingerprint}.{entry['format']}"
-                        and registry._cache_is_valid(output, metadata_path, fingerprint=fingerprint,
-                                                     output_format=entry["format"], max_bytes=MAX_FILE, renderer=renderer),
+            if inline:
+                cache_path = f".cache/vegavisuals/text/{fingerprint}.{entry['format']}"
+                metadata_path = f".cache/vegavisuals/text/{fingerprint}.json"
+                cache_bytes = reader.read(cache_path)
+                metadata_bytes = reader.read(metadata_path, 65536)
+                metadata = parse(metadata_bytes)
+                require(digest(cache_bytes) == entry["output_sha256"]
+                        and all(metadata.get(key) == entry[key] for key in
+                                ("engine", "format", "profile", "family", "vega_lite_version", "fingerprint", "renderer", "output_sha256"))
+                        and registry._cache_is_valid(cache_path, metadata_path, fingerprint=fingerprint,
+                                                     output_format=entry["format"], max_bytes=MAX_FILE, renderer=renderer)
+                        and (bool(matches) or output == cache_path),
                         "invalid inline cache contract")
+                native["native-cache"] = ("native-cache-metadata", metadata_bytes)
             artifact = reader.read(output)
             require(digest(artifact) == entry["output_sha256"], "managed output was modified")
             registry._validate_artifact_data(artifact, entry["format"], max_bytes=MAX_FILE)
@@ -655,6 +714,7 @@ def export(registry: Registry, output_path: str, bundle_path: str, *, visualizat
             _domain(registry, doc, {item["id"]: item for item in files}, {item["id"]: payload[item["path"]] for item in files})
 
             def recheck():
+                _verify_project_root(registry)
                 require(_producer_inventory() == inventory, "producer/package resources changed during export")
                 require(registry._fingerprint(validation, output_format=entry["format"]) == fingerprint, "render contract changed during export")
 

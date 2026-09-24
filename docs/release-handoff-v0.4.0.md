@@ -84,12 +84,20 @@ Local owner validation completed on 2026-09-24:
 | --- | --- |
 | Central session preflight | Eligible, clean start on `feat/artifact-handoff-v1`, explicit root `/home/benizar/git/vegavisuals`. |
 | `make check` | Passed; both committed example outputs regenerated through `render-all`, with byte-identical SVGs and refreshed native fingerprints. |
-| `make tests` with both explicit central reference variables | Passed. Final Python 3.10.20 and 3.14.5 runs each report 144 tests, with four runtime-smoke tests intentionally gated out of the host suite and exercised separately. |
+| `make tests` with both explicit central reference variables | Passed. Final Python 3.10.20 and 3.14.5 runs each report 150 tests, with four runtime-smoke tests intentionally gated out of the host suite and exercised separately. |
 | `make mcp-build` / `make mcp-check` | Passed with the pinned private MCP environment. |
 | `make mcp-smoke REQUIRE_DOCKER=1` | Passed for CLI and factory-Make transports, file/inline bundles with both engines, plus all three Docker smoke cases. |
 | `make docker-smoke REQUIRE_DOCKER=1` | Passed: both engines/all formats, isolated container cleanup, retained-data relocation and SVG reproduction after producer retirement. |
 | `make tests-install` | Passed: Linux wheel/sdist, wheel rebuilt from sdist, non-editable package assets, CLI/native receipt checks and real installed-wheel MCP exports. |
 | Independent v1 verifier | Pinned figure/deck fixtures and producer bundles accepted; moved retained bundles remain valid and missing retained data is rejected. |
+
+PR #9 review follow-up adds regressions for root replacement during Git inspection
+and ignore mutation, cache edits after the initial comparison, commit failures at
+every transaction boundary (including interruption after archive rename), and
+missing/modified cache evidence for explicit inline outputs. Git and mutations
+share the startup descriptor; original cache snapshots reach the exchanges;
+rollback handles survive all commit/archive steps; inline exports retain verified
+native cache metadata together with the explicit output's lock evidence.
 
 The observed renderer in these proofs is
 `sha256:46aaea98bb22103cc01d7c85e2230ed04137c2d5c34a5aae6d58cd64dd61e29e`,
