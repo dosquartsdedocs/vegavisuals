@@ -46,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Consumer project root; MCP serve defaults to MCP_CONSUMER_WORKSPACE",
     )
     parser.add_argument("--version", action="version", version=f"vegavisuals {__version__}")
+    parser.add_argument(
+        "--renderer-image-id",
+        help="Require this full sha256 Docker image ID; defaults to VEGAVISUALS_RENDERER_IMAGE_ID; never build or pull",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("version", help="Return package version metadata")
@@ -204,7 +208,7 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                     "mcp",
                     "serve",
                 ],
-                env=dict(os.environ),
+                env={**os.environ, **registry._renderer_environment()},
             )
             async with stdio_client(parameters) as (reader, writer):
                 async with ClientSession(reader, writer) as session:
@@ -214,6 +218,7 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                     factory = await session.call_tool("factory_check", {})
                     factory_payload = json.loads("\n".join(getattr(item, "text", "") for item in factory.content))
                     rendered = []
+                    renderer_image_ids = []
                     for engine, spec in (
                         (
                             "vega-lite",
@@ -248,6 +253,7 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                             },
                         )
                         payload = json.loads("\n".join(getattr(item, "text", "") for item in result.content))
+                        renderer_image_ids.append(payload.get("renderer", {}).get("image_id"))
                         rendered.append(
                             not result.isError
                             and payload.get("ok") is True
@@ -258,11 +264,13 @@ def dispatch(args: argparse.Namespace, registry: Registry) -> int:
                     return {
                         "ok": factory_payload.get("ok") is True
                         and all(rendered)
+                        and (registry.renderer_image_id is None or renderer_image_ids == [registry.renderer_image_id] * 2)
                         and set(("factory_check", "render_visualization_text")) <= tool_names
                         and set(("vegavisuals://factory/check", "vegavisuals://factory-manifest")) <= resource_uris,
                         "tools": len(tool_names),
                         "resources": len(resource_uris),
                         "rendered": rendered,
+                        "renderer_image_ids": renderer_image_ids,
                     }
 
         try:
@@ -423,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             project = os.environ.get("MCP_CONSUMER_WORKSPACE", ".")
         else:
             project = "."
-        registry = Registry(project)
+        registry = Registry(project, renderer_image_id=args.renderer_image_id)
         return dispatch(args, registry)
     except RecursionError as exc:
         print_error(

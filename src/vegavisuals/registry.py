@@ -56,6 +56,7 @@ PROJECT_LOCK_PATH = ".cache/vegavisuals/project.lock"
 CONTAINER_LABEL = "io.context.mcp-factory=vegavisuals"
 CONTAINER_WORKSPACE_LABEL = "io.context.mcp-factory.workspace"
 RENDERER_CONTRACT_LABEL = "io.vegavisuals.renderer-contract"
+RENDERER_IMAGE_ID_ENV = "VEGAVISUALS_RENDERER_IMAGE_ID"
 MAX_JSON_DEPTH = 128
 RENAME_NOREPLACE = 1
 RENAME_EXCHANGE = 2
@@ -636,7 +637,18 @@ class _ProjectPublication:
 class Registry:
     """Core registry shared by the CLI and FastMCP adapter."""
 
-    def __init__(self, project_root: str | pathlib.Path = ".", *, runner: Runner | None = None) -> None:
+    def __init__(
+        self,
+        project_root: str | pathlib.Path = ".",
+        *,
+        runner: Runner | None = None,
+        renderer_image_id: str | None = None,
+    ) -> None:
+        selected = renderer_image_id if renderer_image_id is not None else os.environ.get(RENDERER_IMAGE_ID_ENV)
+        if selected is not None and (not isinstance(selected, str) or not IMAGE_ID_RE.fullmatch(selected)):
+            raise ValidationError("renderer image ID must be a full lowercase sha256:<64 hex digits> Docker image ID")
+        # Resolve once at startup, independently of the package-owned profile.
+        self._renderer_image_id = selected
         root = pathlib.Path(project_root).expanduser()
         self._startup_project_root = pathlib.Path(os.path.abspath(root))
         try:
@@ -654,6 +666,21 @@ class Registry:
         except OSError as exc:
             raise PolicyError(f"consumer project root cannot be pinned safely: {project_root}") from exc
         self._runner = runner if runner is not None else _run_command
+
+    @property
+    def renderer_image_id(self) -> str | None:
+        return self._renderer_image_id
+
+    def _renderer_environment(self) -> dict[str, str]:
+        return {RENDERER_IMAGE_ID_ENV: self._renderer_image_id} if self._renderer_image_id is not None else {}
+
+    def _renderer_cli_options(self) -> list[str]:
+        return ["--renderer-image-id", self._renderer_image_id] if self._renderer_image_id is not None else []
+
+    def _factory_runtime_command(self, command: list[str]) -> list[str]:
+        if self._renderer_image_id is not None:
+            return ["env", f"{RENDERER_IMAGE_ID_ENV}={self._renderer_image_id}", *command]
+        return command
 
     def close(self) -> None:
         descriptor = getattr(self, "_project_root_fd", -1)
@@ -1570,13 +1597,17 @@ class Registry:
 
                 def normalize_command(command: Any) -> Any:
                     if checkout is None and isinstance(command, list) and command[:1] == ["vegavisuals"]:
-                        return [sys.executable, "-m", "vegavisuals.cli", *command[1:]]
+                        return [sys.executable, "-m", "vegavisuals.cli", *self._renderer_cli_options(), *command[1:]]
+                    if checkout is not None and isinstance(command, list):
+                        return self._factory_runtime_command(command)
                     return command
 
                 static_transport = discovery.get("transport")
+                static_env = static_transport.get("env") if isinstance(static_transport, dict) else None
                 if not isinstance(static_transport, dict) or {
                     **static_transport,
                     "command": normalize_command(static_transport.get("command")),
+                    "env": {**static_env, **self._renderer_environment()} if isinstance(static_env, dict) else static_env,
                 } != dynamic["transport"]:
                     issues.append("static factory manifest does not match dynamic transport")
                 static_commands = discovery.get("commands")
@@ -1623,8 +1654,16 @@ class Registry:
                 compile(worker.read_text(encoding="utf-8"), str(worker), "exec")
             except (OSError, SyntaxError) as exc:
                 issues.append(f"packaged renderer worker is invalid: {exc}")
+        renderer_status: dict[str, Any] = {}
+        if self._renderer_image_id is not None:
+            try:
+                name, data, path = self._load_profile(profile)
+                renderer_status["renderer"] = self._public_renderer(self._inspect_renderer(name, data, path))
+            except (ValidationError, RenderError) as exc:
+                issues.append(str(exc))
         return {
             "ok": not issues,
+            **renderer_status,
             "issues": issues,
             "compatibility": compatibility,
             "themes": themes,
@@ -2083,6 +2122,10 @@ class Registry:
             "registry_contract": _sha256_file(pathlib.Path(__file__).resolve()),
             "dependencies": dependencies,
         }
+        if self._renderer_image_id is not None:
+            # Normal mode remains portable across compatible local rebuilds.
+            # Explicit mode instead binds freshness and cache paths to this ID.
+            values["renderer_image_id"] = self._renderer_image_id
         return _sha256_bytes(_json_bytes(values))
 
     def _resolve_format(self, output: pathlib.Path | None, requested: str | None) -> str:
@@ -2117,7 +2160,8 @@ class Registry:
         return {
             key: value
             for key, value in renderer.items()
-            if key in {"ok", "available", "profile", "image", "image_id", "base_image", "renderer_contract", "built"}
+            if key in {"ok", "available", "profile", "image", "image_id", "base_image", "renderer_contract", "built",
+                       "selection_mode", "expected_image_id"}
         }
 
     def _lock_renderer(self, renderer: dict[str, Any]) -> dict[str, str]:
@@ -2173,6 +2217,7 @@ class Registry:
         profile_path: pathlib.Path,
     ) -> dict[str, Any]:
         renderer_contract = self._renderer_contract(profile_path)
+        selected_image = self._renderer_image_id or str(profile_data["image"])
         inspect = self._runner(
             [
                 "docker",
@@ -2180,7 +2225,7 @@ class Registry:
                 "inspect",
                 "--format",
                 f'{{{{.Id}}}}\t{{{{ index .Config.Labels "{RENDERER_CONTRACT_LABEL}" }}}}',
-                str(profile_data["image"]),
+                selected_image,
             ],
             cwd=self.project_root,
             timeout=60,
@@ -2192,15 +2237,24 @@ class Registry:
             if len(fields) == 2:
                 image_id, label = fields
         available = bool(image_id and IMAGE_ID_RE.fullmatch(image_id) and label == renderer_contract)
+        if self._renderer_image_id is not None:
+            if not available or image_id != self._renderer_image_id:
+                raise RenderError(
+                    f"explicit renderer image {self._renderer_image_id} is missing or incompatible: "
+                    f"observed image ID={image_id!r}, contract label={label!r}, "
+                    f"expected contract={renderer_contract}; no build or pull was attempted"
+                )
         return {
             "ok": available,
             "available": available,
             "profile": profile_name,
-            "image": profile_data["image"],
+            "image": selected_image,
             "image_id": image_id if available else None,
             "base_image": profile_data["base_image"],
             "renderer_contract": renderer_contract,
             "inspect": inspect,
+            **({"selection_mode": "explicit-image-id", "expected_image_id": self._renderer_image_id}
+               if self._renderer_image_id is not None else {}),
         }
 
     def _build_renderer(
@@ -2252,6 +2306,8 @@ class Registry:
         return payload
 
     def build_renderer(self, profile: str = DEFAULT_PROFILE, *, dry_run: bool = False) -> dict[str, Any]:
+        if self._renderer_image_id is not None:
+            raise PolicyError("build-renderer is disabled with an explicit renderer image ID; prepare it separately")
         profile_name, profile_data, profile_path = self._load_profile(profile)
         if dry_run:
             return self._build_renderer(profile_name, profile_data, profile_path, dry_run=True)
@@ -2260,6 +2316,8 @@ class Registry:
 
     def ensure_renderer(self, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
         profile_name, profile_data, profile_path = self._load_profile(profile)
+        if self._renderer_image_id is not None:
+            return {**self._inspect_renderer(profile_name, profile_data, profile_path), "built": False}
         with self._renderer_build_lock(str(profile_data["image"])):
             inspected = self._inspect_renderer(profile_name, profile_data, profile_path)
             if inspected["available"]:
@@ -2818,9 +2876,14 @@ class Registry:
             return "unmanaged", snapshot
         if actual_hash != entry.get("output_sha256"):
             return "modified", snapshot
-        if fingerprint == entry.get("fingerprint"):
+        if fingerprint == entry.get("fingerprint") and self._renderer_selection_matches(entry.get("renderer", {})):
             return "fresh", snapshot
         return "stale", snapshot
+
+    def _renderer_selection_matches(self, renderer: dict[str, Any]) -> bool:
+        return self._renderer_image_id is None or (
+            renderer.get("image") == self._renderer_image_id and renderer.get("image_id") == self._renderer_image_id
+        )
 
     def _dry_run_command(
         self,
@@ -4409,7 +4472,7 @@ class Registry:
                         "type": "stdio",
                         "command": server_command,
                         "args": args,
-                        "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder},
+                        "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder, **self._renderer_environment()},
                     }
                 }
             }
@@ -4418,7 +4481,7 @@ class Registry:
                 "vegavisuals": {
                     "command": server_command,
                     "args": args,
-                    "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder},
+                    "env": {"MCP_CONSUMER_WORKSPACE": workspace_placeholder, **self._renderer_environment()},
                 }
             }
         }
@@ -4428,11 +4491,11 @@ class Registry:
         factory_root = factory_metadata_root()
         client = self.client_config()["mcpServers"]["vegavisuals"]
         if checkout is not None:
-            factory_make = ["make", "--no-print-directory", "-C", "${factoryRoot}"]
-            factory_launcher = [
+            factory_make = self._factory_runtime_command(["make", "--no-print-directory", "-C", "${factoryRoot}"])
+            factory_launcher = self._factory_runtime_command([
                 "bash",
                 "${factoryRoot}/scripts/factory-launcher",
-            ]
+            ])
             project = "${workspaceFolder}"
             transport = [*factory_make, "mcp-stdio"]
             commands = {
@@ -4453,7 +4516,7 @@ class Registry:
                 "render_all": [*factory_launcher, "render-all", project],
             }
         else:
-            package_cli = [sys.executable, "-m", "vegavisuals.cli"]
+            package_cli = [sys.executable, "-m", "vegavisuals.cli", *self._renderer_cli_options()]
             project_cli = [*package_cli, "--project", "${workspaceFolder}"]
             transport = [*package_cli, "mcp", "serve"]
             commands = {
@@ -4539,7 +4602,7 @@ class Registry:
             "transport": {
                 "type": "stdio",
                 "command": transport,
-                "env": {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}"},
+                "env": {"MCP_CONSUMER_WORKSPACE": "${workspaceFolder}", **self._renderer_environment()},
             },
             "commands": commands,
             "mcp": {

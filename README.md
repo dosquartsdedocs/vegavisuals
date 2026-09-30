@@ -8,9 +8,11 @@ Chromium, or a host installation of Vega.
 
 The host CLI requires Python 3.10 or newer and Linux because publication uses
 descriptor-relative I/O, `flock`, and fail-closed `renameat2` operations.
-Rendering also requires Docker. Linux x86_64 is the release-tested host;
-source installations on other Linux architectures require compatible wheels
-for every pinned dependency.
+Rendering also requires Docker. The published wheel is tagged
+`py3-none-linux_x86_64`; the released renderer archive is `linux/amd64`.
+Other Linux architectures have not been release-tested. Building an sdist on
+another architecture does not establish support, even if its dependencies install.
+Windows and macOS are not supported host platforms.
 
 The default compatibility profile is `vl-convert-1.9.0`: Vega 6.2.0,
 Vega-Lite 6.4 by default, SVG/PNG/PDF output, deterministic PDF normalization
@@ -21,23 +23,63 @@ policy are exposed by `vegavisuals compatibility-status`; the source data is in
 
 ## Quick Start
 
-```bash
-git clone https://github.com/dosquartsdedocs/vegavisuals.git
-cd vegavisuals
-python3 -m pip install '.[mcp]'
-vegavisuals build-renderer
+### Installed release, without a checkout
 
-vegavisuals --project /path/to/consumer validate charts/summary.vl.json
-vegavisuals --project /path/to/consumer render \
-  charts/summary.vl.json public/summary.svg
-vegavisuals --project /path/to/consumer render-all
-vegavisuals --project /path/to/consumer check
+Install the published Linux x86_64 wheel into a dedicated environment. Use its
+explicit interpreter for preparation, metadata discovery and stdio:
+
+```bash
+python3 -m venv /absolute/path/to/vegavisuals-0.4.0
+PYTHON=/absolute/path/to/vegavisuals-0.4.0/bin/python
+"$PYTHON" -m pip install 'vegavisuals[mcp] @ https://github.com/dosquartsdedocs/vegavisuals/releases/download/v0.4.0/vegavisuals-0.4.0-py3-none-linux_x86_64.whl#sha256=b52ffa743643dd6b5e0320e7a9aa0cd500ea06262b7d5098c0c3f94a379bc0ea'
+"$PYTHON" -m vegavisuals.cli install-check
+"$PYTHON" -m vegavisuals.cli factory-manifest
 ```
 
-The first renderer build needs access to Debian and PyPI repositories. Render
-containers themselves run without network access and never pull images.
-No prebuilt renderer image is published; each installation builds its local
-image from the licensed source package and pinned compatibility profile.
+The [v0.4.0 release](https://github.com/dosquartsdedocs/vegavisuals/releases/tag/v0.4.0)
+also publishes an sdist, `release.json`, `SHA256SUMS` and the tested
+`vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz` Docker image archive.
+Download the assets into a dedicated directory and verify them with
+`sha256sum --check SHA256SUMS`. The archive SHA-256, Docker image ID and
+renderer-contract hash are separate identities recorded in `release.json`.
+
+The archive carries the fixed profile alias `vegavisuals/render:vl-convert-1.9.0`.
+Inspect that alias before loading: loading can replace a different existing
+selection. Use an isolated Docker daemon for an independent installation, or
+an environment where that alias is absent or already selects the release image:
+
+```bash
+docker image load --input vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz
+docker image inspect --format '{{.Id}}' vegavisuals/render:vl-convert-1.9.0
+# Require sha256:695125943d0fbc3aa7c877babb9a11a6501bbc7ac265b0975bb5657c60439d98
+"$PYTHON" -m vegavisuals.cli ensure-renderer
+# With the prepared image: ok=true, available=true, built=false.
+"$PYTHON" -m vegavisuals.cli factory-lifecycle-check
+"$PYTHON" -m vegavisuals.cli --project /path/to/consumer init
+"$PYTHON" -m vegavisuals.cli --project /path/to/consumer render \
+  charts/summary.vl.json public/summary.svg
+"$PYTHON" -m vegavisuals.cli --project /path/to/consumer check
+MCP_CONSUMER_WORKSPACE=/path/to/consumer "$PYTHON" -m vegavisuals.cli mcp serve
+```
+
+Declare the source/output pair in [`.vegavisuals.yml`](#project-manifest) before
+using `check` as its freshness evidence: `init` starts with an empty manifest,
+and a direct render does not add a manifest entry.
+
+`ensure-renderer` reuses an image with the matching renderer-contract label; it
+does not enforce the release's exact image ID. Compare that ID explicitly when
+selecting the published package/image tuple. Stdio startup itself does not build.
+Render containers run without network access and never pull images. No renderer
+registry RepoDigest is published for this release.
+
+Local preparation from the installed package also works: `build-renderer --dry-run`
+shows the packaged Dockerfile/context and `ensure-renderer` builds if the profile
+image is absent or incompatible. That first build needs Debian/PyPI access and
+produces a local image ID, which need not equal the published archive's ID.
+See the [owner preparation report](docs/owner-preparation-2026-09-29.md) for
+verified resources, native descriptor, tested capabilities and platform limits.
+
+### Checkout development lifecycle
 
 The checkout also exposes a self-contained consumer lifecycle. It creates a
 content-addressed, checkout-bound MCP environment under the factory, pins
@@ -96,6 +138,52 @@ Inspect them after a reported publication conflict; `make clean` or manual cache
 removal is the explicit point at which they are discarded.
 The project lock, managed outputs, and `.cache/vegavisuals/replaced/` must
 reside on the same filesystem so that publication and recovery remain atomic.
+
+## Explicit Renderer Selection (0.5.0 development)
+
+The `0.5.0.dev0` control plane adds a startup-fixed **Docker image ID** selector.
+This option is not present in the published 0.4.0 wheel above. It lets independent
+installations select different prepared images on one daemon without changing
+the shared profile alias or any packaged renderer resources:
+
+```bash
+IMAGE_ID=sha256:695125943d0fbc3aa7c877babb9a11a6501bbc7ac265b0975bb5657c60439d98
+# PYTHON must identify an installation of the new control plane.
+"$PYTHON" -m vegavisuals.cli --renderer-image-id "$IMAGE_ID" ensure-renderer
+"$PYTHON" -m vegavisuals.cli --renderer-image-id "$IMAGE_ID" \
+  --project /path/to/consumer render-all
+VEGAVISUALS_RENDERER_IMAGE_ID="$IMAGE_ID" \
+  MCP_CONSUMER_WORKSPACE=/path/to/consumer "$PYTHON" -m vegavisuals.cli mcp serve
+```
+
+The Python API is `Registry(root, renderer_image_id=IMAGE_ID)`. Explicit API/CLI
+values take precedence over `VEGAVISUALS_RENDERER_IMAGE_ID`; the effective value
+is read once at startup. Only full lowercase `sha256:<64 hex digits>` image IDs
+are accepted, not tags, abbreviated IDs or registry RepoDigests. An empty value
+is an error; unset the environment variable to use normal profile-based mode.
+
+Every explicit render/freshness inspection requires both the exact expected
+image ID and the existing renderer-contract label. A missing, wrong-ID or
+incompatible image fails, including on dry runs and cache hits, without build,
+pull, retagging or fallback. `ensure-renderer` only checks/reuses the selection;
+`build-renderer` is disabled in this mode. Acquire/load the image separately.
+Image acquisition must preserve aliases already used by other installations.
+
+The selected ID participates in fingerprints and inline cache paths. Switching
+A → B makes A's managed outputs stale; switching back preserves A's independent
+inline cache. User-modified outputs still require explicit replacement approval.
+Locks, cache metadata and bundles record the effective ID; receipt v1 retains
+its source/artifact hash format and is issued only after selected-runtime
+freshness succeeds. Retained-bundle verification remains offline and independent
+of the selected or available renderer. Normal mode keeps its portable,
+contract-based freshness behavior across compatible local rebuilds.
+
+`mcp client-config` includes the selected ID in the server environment, and
+`factory-manifest` carries it in the effective transport and lifecycle commands.
+MCP tools cannot change the selection during a session. This is a native option;
+central H1 schema/range adoption remains separate. The control-plane change
+invalidates old host fingerprints through the existing registry-code hash;
+regenerate managed outputs through the provider after upgrading.
 
 ## Source And Data Policy
 

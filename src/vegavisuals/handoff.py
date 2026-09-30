@@ -610,6 +610,9 @@ def export(registry: Registry, output_path: str, bundle_path: str, *, visualizat
             require(fingerprint == entry["fingerprint"], "output is stale; render with current sources/options before export")
             require(digest(source_bytes) == validation["source_sha256"], "source changed during export")
             renderer = entry["renderer"]
+            require(registry._renderer_selection_matches(renderer), "native renderer differs from explicit selection")
+            if registry.renderer_image_id is not None:
+                registry._inspect_renderer(validation["profile"], validation["_profile_data"], validation["_profile_path"])
             require(isinstance(renderer, dict) and isinstance(renderer.get("image_id"), str)
                     and re.fullmatch(r"sha256:[0-9a-f]{64}", renderer["image_id"]) is not None, "invalid native renderer provenance")
             require(registry._renderer_contract(validation["_profile_path"]) == renderer["renderer_contract"], "stale renderer contract")
