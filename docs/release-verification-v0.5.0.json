@@ -1,0 +1,44 @@
+{
+  "ok": true,
+  "release": "https://github.com/dosquartsdedocs/vegavisuals/releases/tag/v0.5.0",
+  "source_revision": "2b34c338ebb229bbe9b4def2a141f0176217ee5a",
+  "files": [
+    {
+      "name": "SHA256SUMS",
+      "sha256": "32792e8314a06d87ee2327f8816ca369e2d3d754d43b80ca0e540ebbb91ffcda",
+      "bytes": 483
+    },
+    {
+      "name": "acceptance.json",
+      "sha256": "41ce3ee90cfa7dfe5507eb20e4b53895dc365da5a19177f02fe9252a665e6558",
+      "bytes": 25333
+    },
+    {
+      "name": "release.json",
+      "sha256": "7dab5dbcce5a665d4fa30e980629db35ecfda05ed67344aef7dbd014646b179b",
+      "bytes": 3253
+    },
+    {
+      "name": "vegavisuals-0.5.0-py3-none-linux_x86_64.whl",
+      "sha256": "da7c6ba33b618eeacc40813c76bfc4295fdacda667873ffcfb242864c21f387f",
+      "bytes": 92682
+    },
+    {
+      "name": "vegavisuals-0.5.0.tar.gz",
+      "sha256": "6f8e00e36d9eaea45c557ab8490acc53b854eb682c47598c734949b9989b8ec4",
+      "bytes": 169617
+    },
+    {
+      "name": "vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz",
+      "sha256": "382d2d5dc25d8539787d8089ff7c9fc553d0e8f26d1289f728d87ba4bb090f1f",
+      "bytes": 81194322
+    }
+  ],
+  "installed_delivery_python": "3.14.5",
+  "complete_native_aba_rerun": true,
+  "post_retirement_bundle_checks": 12,
+  "bundle_manifests_identical_to_candidate": true,
+  "delivered_acceptance_sha256": "8fb7425444178fcd533e985027eb362fdfde9b5552c4762395e5c39175e9524e",
+  "candidate_acceptance_sha256": "15c329eb6836bd2d71155413e20540690d48098675fac362e1184b7f4db0a73d",
+  "published_receipt_assets_replaced": false
+}
