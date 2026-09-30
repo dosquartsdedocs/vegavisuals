@@ -1,6 +1,6 @@
 schema_version: 1
 name: vegavisuals
-version: 0.5.0.dev0
+version: 0.5.0
 kind: codex-mcp-factory
 install_scope: user
 description: Hardened Docker rendering for themed Vega-Lite and Vega visualizations.
@@ -103,7 +103,7 @@ discovery:
   suggested_scan_roots: [~/git]
   checkout_required_for_make_lifecycle: false
 release:
-  default: v0.5.0.dev0
+  default: v0.5.0
   profile: vl-convert-1.9.0
   family: benizar
 defaults:

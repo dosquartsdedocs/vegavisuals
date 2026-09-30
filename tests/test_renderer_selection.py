@@ -111,6 +111,22 @@ class RendererSelectionTest(TemporaryProject):
                 registry.build_renderer(dry_run=dry_run)
         self.assertEqual(runner.calls, [])
 
+    def test_failed_inspection_ignores_partial_success_output_and_valid_cache(self):
+        registry, runner = self.selected()
+        rendered = registry.render_visualization_text(vl_spec())
+        cache_before = (self.root / rendered["cache"]).read_bytes()
+        for code in (1, 124, 127):
+            with self.subTest(returncode=code), patch.object(registry, "_runner", return_value={
+                "returncode": code,
+                "stdout": f"{IMAGE_A}\t{runner.renderer_contract}\n",
+                "stderr": "inspection failed after partial output",
+            }) as failed:
+                with self.assertRaisesRegex(RenderError, "explicit renderer image"):
+                    registry.render_visualization_text(vl_spec())
+                self.assertEqual(failed.call_count, 1)
+                self.assertEqual(failed.call_args.args[0][:3], ["docker", "image", "inspect"])
+                self.assertEqual((self.root / rendered["cache"]).read_bytes(), cache_before)
+
     def test_two_runtimes_change_freshness_receipts_and_bundle_provenance(self):
         self.manifest()
         first, runner_a = self.selected()
