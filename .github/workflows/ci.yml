@@ -45,6 +45,19 @@ jobs:
         if: matrix.python == '3.14'
         run: docker info
 
+      - name: Reuse the verified released renderer
+        if: matrix.python == '3.14'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$RUNNER_TEMP/vegavisuals-renderer/vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz"
+          gh release download v0.4.0 --repo dosquartsdedocs/vegavisuals \
+            --pattern vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz \
+            --dir "$RUNNER_TEMP/vegavisuals-renderer"
+          python -c 'import hashlib,sys; assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "382d2d5dc25d8539787d8089ff7c9fc553d0e8f26d1289f728d87ba4bb090f1f"' "$archive"
+          docker image load --input "$archive"
+          test "$(docker image inspect --format '{{.Id}}' vegavisuals/render:vl-convert-1.9.0)" = sha256:695125943d0fbc3aa7c877babb9a11a6501bbc7ac265b0975bb5657c60439d98
+
       - name: Verify distributions and the real renderer
         if: matrix.python == '3.14'
         run: make tests-install docker-smoke PYTHON=python REQUIRE_DOCKER=1

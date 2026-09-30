@@ -628,13 +628,13 @@ class InventoryTest(TemporaryProject):
             ), patch("vegavisuals.cli.Registry") as registry_class, patch("vegavisuals.cli._print"):
                 registry_class.return_value.version_status.return_value = {"ok": True}
                 self.assertEqual(main(arguments), 0)
-            registry_class.assert_called_once_with(".")
+            registry_class.assert_called_once_with(".", renderer_image_id=None)
 
         with patch.dict(os.environ, {"MCP_CONSUMER_WORKSPACE": project}), patch(
             "vegavisuals.cli.Registry"
         ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
             self.assertEqual(main(["mcp", "serve"]), 0)
-        registry_class.assert_called_once_with(project)
+        registry_class.assert_called_once_with(project, renderer_image_id=None)
         run_server.assert_called_once_with(registry_class.return_value)
 
         explicit = "/tmp/explicit-project"
@@ -642,7 +642,7 @@ class InventoryTest(TemporaryProject):
             "vegavisuals.cli.Registry"
         ) as registry_class, patch("vegavisuals.mcp_server.run_server") as run_server:
             self.assertEqual(main(["--project", explicit, "mcp", "serve"]), 0)
-        registry_class.assert_called_once_with(explicit)
+        registry_class.assert_called_once_with(explicit, renderer_image_id=None)
         run_server.assert_called_once_with(registry_class.return_value)
 
     def test_factory_check_compares_install_scope(self) -> None:

@@ -32,6 +32,15 @@ class MCPStdioSmokeTest(unittest.TestCase):
                 )
                 project.mkdir()
                 shutil.copytree(REPO_ROOT / "examples", project / "examples")
+                raw_path = project / "examples/vega/raw.vg.json"
+                raw = json.loads(raw_path.read_bytes())
+                for index, data in enumerate(raw.get("data", [])):
+                    if "values" in data:
+                        path = f"examples/vega/data-{index}.json"
+                        (project / path).write_text(json.dumps(data.pop("values")), encoding="utf-8")
+                        data["url"] = path
+                raw_path.write_text(json.dumps(raw), encoding="utf-8")
+                selected_image = os.environ.get("VEGAVISUALS_RENDERER_IMAGE_ID")
                 executable = os.environ.get("VEGAVISUALS_MCP_COMMAND")
                 arguments_json = os.environ.get("VEGAVISUALS_MCP_ARGS_JSON")
                 factory_root = os.environ.get("VEGAVISUALS_MCP_FACTORY_ROOT")
@@ -91,6 +100,9 @@ class MCPStdioSmokeTest(unittest.TestCase):
                         self.assertIn("vegavisuals://factory/check", uris)
                         self.assertIn("vegavisuals://release", uris)
                         self.assertIn("vegavisuals://factory-manifest", uris)
+                        metadata = await session.call_tool("factory_manifest", {})
+                        factory = json.loads("\n".join(getattr(item, "text", "") for item in metadata.content))
+                        self.assertEqual(factory["transport"]["env"].get("VEGAVISUALS_RENDERER_IMAGE_ID"), selected_image)
                         initialized = await session.call_tool("initialize_project", {})
                         initialized_payload = json.loads(
                             "\n".join(getattr(item, "text", "") for item in initialized.content)
@@ -113,6 +125,9 @@ class MCPStdioSmokeTest(unittest.TestCase):
                             self.assertFalse(rendered.isError)
                             self.assertTrue(payload["ok"], payload)
                             self.assertEqual(payload["engine"], engine)
+                            if selected_image:
+                                self.assertEqual(payload["renderer"]["image_id"], selected_image)
+                                self.assertEqual(payload["renderer"]["expected_image_id"], selected_image)
                             self.assertTrue((project / output).is_file())
                             exported = await session.call_tool("export_visualization_bundle", {
                                 "output_path": output, "bundle_path": f"bundles/{engine}",
@@ -134,6 +149,8 @@ class MCPStdioSmokeTest(unittest.TestCase):
                             })
                             payload = json.loads("\n".join(getattr(item, "text", "") for item in rendered.content))
                             self.assertTrue(payload["ok"], payload)
+                            if selected_image:
+                                self.assertEqual(payload["renderer"]["image_id"], selected_image)
                             exported = await session.call_tool("export_visualization_bundle", {
                                 "output_path": payload["artifact"]["path"], "bundle_path": f"bundles/inline-{engine}",
                                 "visualization_text": text,
