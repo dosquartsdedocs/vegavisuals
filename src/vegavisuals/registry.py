@@ -33,6 +33,7 @@ import yaml
 
 from ._version import __version__
 from .errors import ManifestError, PolicyError, RenderError, ValidationError
+from .identity import StartupIdentity
 
 
 DEFAULT_PROFILE = "vl-convert-1.9.0"
@@ -121,6 +122,7 @@ MCP_TOOL_NAMES = (
     "release_status",
     "update",
     "factory_manifest",
+    "runtime_identity",
 )
 MCP_RESOURCE_URIS = (
     "vegavisuals://agent-guide",
@@ -131,6 +133,7 @@ MCP_RESOURCE_URIS = (
     "vegavisuals://factory/check",
     "vegavisuals://release",
     "vegavisuals://factory-manifest",
+    "vegavisuals://runtime/identity",
 )
 
 CommandResult = dict[str, Any]
@@ -666,6 +669,13 @@ class Registry:
         except OSError as exc:
             raise PolicyError(f"consumer project root cannot be pinned safely: {project_root}") from exc
         self._runner = runner if runner is not None else _run_command
+        self._identity = StartupIdentity.capture(source_checkout())
+
+    def runtime_identity(self, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+        """Inspect this live instance and current disk/renderer identity without preparation."""
+        from .identity import report
+
+        return report(self, self._identity, profile)
 
     @property
     def renderer_image_id(self) -> str | None:

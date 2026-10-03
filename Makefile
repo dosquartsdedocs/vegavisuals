@@ -90,6 +90,7 @@ tests-install: build
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals factory-check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals self-test >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals mcp-smoke >/dev/null
+	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals runtime-identity >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . down >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . check >/dev/null
 	@env -u PYTHONPATH .tmp/install-venv/bin/vegavisuals --project . render examples/vega-lite/bar.vl.json .cache/vegavisuals/install-check.svg --dry-run >/dev/null

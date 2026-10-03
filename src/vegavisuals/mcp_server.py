@@ -80,6 +80,11 @@ def create_server(registry: Registry, fastmcp_class: Any | None = None) -> Any:
         """Factory discovery contract."""
         return json_dumps(registry.factory_manifest())
 
+    @mcp.resource("vegavisuals://runtime/identity")
+    def runtime_identity_resource() -> str:
+        """Read-only identity of this running instance, its disk metadata and renderer."""
+        return json_dumps(_safe(registry.runtime_identity))
+
     @mcp.tool()
     def initialize_project(force: bool = False) -> dict[str, Any]:
         """Initialize the fixed consumer root without overwriting files by default."""
@@ -242,6 +247,11 @@ def create_server(registry: Registry, fastmcp_class: Any | None = None) -> Any:
     def factory_manifest() -> dict[str, Any]:
         """Return the factory discovery manifest."""
         return registry.factory_manifest()
+
+    @mcp.tool()
+    def runtime_identity(profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+        """Inspect this live instance's loaded/disk identities and renderer without build, pull or writes."""
+        return _safe(lambda: registry.runtime_identity(profile))
 
     return mcp
 
