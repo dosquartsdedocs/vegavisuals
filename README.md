@@ -30,20 +30,20 @@ explicit interpreter for preparation, metadata discovery and stdio:
 
 ```bash
 # Run from an empty download directory.
-gh release download v0.5.0 --repo dosquartsdedocs/vegavisuals
+gh release download v0.5.1 --repo dosquartsdedocs/vegavisuals
 sha256sum --check SHA256SUMS
-python3 -m venv /absolute/path/to/vegavisuals-0.5.0
-PYTHON=/absolute/path/to/vegavisuals-0.5.0/bin/python
-"$PYTHON" -m pip install './vegavisuals-0.5.0-py3-none-linux_x86_64.whl[mcp]'
+python3 -m venv /absolute/path/to/vegavisuals-0.5.1
+PYTHON=/absolute/path/to/vegavisuals-0.5.1/bin/python
+"$PYTHON" -m pip install './vegavisuals-0.5.1-py3-none-linux_x86_64.whl[mcp]'
 "$PYTHON" -m vegavisuals.cli install-check
 "$PYTHON" -m vegavisuals.cli factory-manifest
 ```
 
-The [v0.5.0 release](https://github.com/dosquartsdedocs/vegavisuals/releases/tag/v0.5.0)
+The [v0.5.1 release](https://github.com/dosquartsdedocs/vegavisuals/releases/tag/v0.5.1)
 also publishes an sdist, `release.json`, `SHA256SUMS` and the tested
 `vegavisuals-render-vl-convert-1.9.0-linux-amd64.tar.gz` Docker image archive.
 The renderer archive is reused byte-for-byte from 0.4.0. The new `release.json`
-binds the 0.5.0 source and distribution hashes to that unchanged renderer.
+binds the 0.5.1 source and distribution hashes to that unchanged renderer.
 Archive SHA-256, Docker image ID and renderer-contract hash are separate identities.
 
 The archive carries the fixed profile alias `vegavisuals/render:vl-convert-1.9.0`.
@@ -79,7 +79,7 @@ With the selector unset, local preparation from the installed package also works
 shows the packaged Dockerfile/context and `ensure-renderer` builds if the profile
 image is absent or incompatible. That first build needs Debian/PyPI access and
 produces a local image ID, which need not equal the published archive's ID.
-See the [0.5.0 release handoff](docs/release-handoff-v0.5.0.md) for the delivery
+See the [0.5.1 release handoff](docs/release-handoff-v0.5.1.md) for the delivery
 contract, owner gates and precise coverage limits. The earlier
 [owner preparation report](docs/owner-preparation-2026-09-29.md) records the
 historical 0.4.0 proof.
@@ -189,6 +189,33 @@ MCP tools cannot change the selection during a session. This is a native option;
 central H1 schema/range adoption remains separate. The control-plane change
 invalidates old host fingerprints through the existing registry-code hash;
 regenerate managed outputs through the provider after upgrading.
+
+## Read-only Runtime Identity
+
+Since 0.5.1, inspect the **already running MCP instance** with tool
+`runtime_identity(profile="vl-convert-1.9.0")` or resource
+`vegavisuals://runtime/identity`. The CLI equivalent describes its own new
+invocation, not another server process:
+
+```bash
+"$PYTHON" -m vegavisuals.cli --renderer-image-id "$IMAGE_ID" \
+  --project /path/to/consumer runtime-identity
+```
+
+Schema 1 reports the loaded package version, startup and current disk metadata,
+installation/source identity, effective interpreter, bound workspace, PID,
+instance ID/start time and the requested/observed renderer identities. It never
+initializes the consumer, prepares an environment, builds/pulls/retags images or
+returns environment variables, origin URLs, Docker stderr or consumer contents.
+It performs only bounded provider-metadata reads and Docker image inspection.
+
+Check `ok` and `mismatches`. An unavailable or incompatible renderer returns a
+versioned failing report with the instance identity still present, not a fallback.
+Image IDs, recorded RepoDigests and installer archive hashes are different fields.
+Use the live MCP connection for activation/reconnection checks; a fresh CLI
+process cannot certify an older MCP. 0.5.0 keeps immutable selection but does not
+expose this new query. See [runtime identity schema 1](docs/runtime-identity-v1.md)
+for exact fields, drift semantics and disclosure limits.
 
 ## Source And Data Policy
 
@@ -300,6 +327,7 @@ return JSON and a nonzero status. Help and `--version` use normal CLI text, and
 
 ```text
 vegavisuals [--project ROOT] version
+vegavisuals [--project ROOT] runtime-identity [--profile PROFILE]
 vegavisuals [--project ROOT] profile-inventory
 vegavisuals [--project ROOT] theme-inventory [--family FAMILY]
 vegavisuals [--project ROOT] compatibility-status [--profile PROFILE]
@@ -402,6 +430,7 @@ factory_check
 release_status
 update
 factory_manifest
+runtime_identity
 ```
 
 Resources:
@@ -415,6 +444,7 @@ vegavisuals://project/check
 vegavisuals://factory/check
 vegavisuals://release
 vegavisuals://factory-manifest
+vegavisuals://runtime/identity
 ```
 
 MCP tools preserve the documented dictionary result contract. Expected policy,

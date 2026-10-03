@@ -53,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("version", help="Return package version metadata")
+    identity = commands.add_parser("runtime-identity", help="Read this instance's loaded, disk and renderer identities without preparing anything")
+    identity.add_argument("--profile", default=DEFAULT_PROFILE)
     commands.add_parser("profile-inventory", help="List JSON compatibility profiles")
     theme = commands.add_parser("theme-inventory", help="List theme families and token assets")
     theme.add_argument("--family", default="")
@@ -150,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace, registry: Registry) -> int:
     if args.command == "version":
         return _result(registry.version_status())
+    if args.command == "runtime-identity":
+        return _result(registry.runtime_identity(args.profile))
     if args.command == "profile-inventory":
         return _result(registry.profile_inventory())
     if args.command == "theme-inventory":
